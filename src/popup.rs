@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-//! CEF-owned popup lifetimes. CEF keeps its native window and opener semantics;
-//! the runtime owns observation, teardown, and the separate protocol observer,
-//! which serves the runtime's own dialog observation and no app callback.
+//! CEF-owned popup lifetimes preserve the original browser and opener.
+//! Surface popups have an explicit, separately identified observation channel;
+//! ordinary popup contents never flow to the opener's protocol handlers.
 
 use crate::{
   FrameNavigationState, NativeWindowToken,
@@ -16,6 +16,31 @@ use std::sync::{
   atomic::{AtomicBool, Ordering},
 };
 use tauri_runtime::dpi::{LogicalPosition, LogicalSize, Rect};
+
+/// Opt-in notifications for real popup browsers embedded in the trusted host.
+/// Each protocol message identifies its own browser; root observers are unchanged.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum SurfacePopupEvent {
+  Created {
+    browser_id: i32,
+    opener_id: i32,
+    token: String,
+    url: String,
+  },
+  Protocol {
+    browser_id: i32,
+    message: crate::DevToolsProtocol,
+  },
+  Closed {
+    browser_id: i32,
+  },
+  Title {
+    browser_id: i32,
+    title: String,
+  },
+}
+pub type SurfacePopupHandler = dyn Fn(SurfacePopupEvent) + Send + Sync;
 
 const MAX_POPUPS: usize = 128;
 
@@ -32,6 +57,7 @@ impl PopupRequest {
 }
 
 struct Popup {
+  surface: bool,
   browser: Browser,
   state: FrameNavigationState,
   opener: FrameNavigationState,
@@ -41,6 +67,7 @@ struct Popup {
 }
 
 pub(crate) struct PopupFamily {
+  surface_handler: Option<Arc<SurfacePopupHandler>>,
   root: FrameNavigationState,
   closing: AtomicBool,
   popups: Mutex<Vec<Arc<Popup>>>,
@@ -49,13 +76,31 @@ pub(crate) struct PopupFamily {
 }
 
 impl PopupFamily {
-  pub(crate) fn new(root: FrameNavigationState) -> Self {
+  pub(crate) fn new(
+    root: FrameNavigationState,
+    surface_handler: Option<Arc<SurfacePopupHandler>>,
+  ) -> Self {
     Self {
+      surface_handler,
       root,
       closing: AtomicBool::new(false),
       popups: Mutex::default(),
       pending: Mutex::default(),
       windows: Mutex::default(),
+    }
+  }
+
+  pub(crate) fn title(&self, state: &FrameNavigationState, title: String) {
+    let id = self.popups.lock().ok().and_then(|popups| {
+      popups
+        .iter()
+        .find(|popup| popup.surface && popup.state.is_same_browser(state))
+        .map(|popup| popup.browser.identifier())
+    });
+    if let Some(browser_id) = id
+      && let Some(handler) = &self.surface_handler
+    {
+      handler(SurfacePopupEvent::Title { browser_id, title });
     }
   }
 
@@ -132,22 +177,30 @@ impl PopupFamily {
       return;
     }
     let dialogs = crate::dialog::DialogState::new(state.clone());
-    // The runtime's own observer, on a handler list of this popup's own that
-    // stays empty: it exists for the internal dialog observation below, never
-    // to feed the opener's app observers. A popup is a separate native browser
-    // navigating wherever its own content goes — an SSO or OAuth window is the
-    // standing case — and a `DevToolsProtocol` notification carries that page's
-    // content, its network activity and its dialog messages, which the web
-    // platform itself denies the opener across origins. An app observes popups
-    // without their content through `Webview::popups`.
-    let Some(observer) =
-      add_dev_tools_observer(browser, Arc::default(), Arc::default(), dialogs.clone())
+    // Popup protocol remains separate from root observers. Only an explicit
+    // surface callback receives messages, tagged with the native browser ID.
+    let token = CefString::from(&host.surface_embed_token()).to_string();
+    let browser_id = browser.identifier();
+    let handlers: Arc<Mutex<Vec<Arc<crate::webview::DevToolsProtocolHandler>>>> = Arc::default();
+    if !token.is_empty()
+      && let Some(handler) = self.surface_handler.clone()
+    {
+      handlers.lock().unwrap().push(Arc::new(move |message| {
+        handler(SurfacePopupEvent::Protocol {
+          browser_id,
+          message,
+        })
+      }));
+    }
+    let Some(observer) = add_dev_tools_observer(browser, handlers, Arc::default(), dialogs.clone())
     else {
       state.close();
       host.close_browser(1);
       return;
     };
+    let surface = !token.is_empty();
     let popup = Arc::new(Popup {
+      surface,
       browser: browser.clone(),
       state: state.clone(),
       opener: opener.clone(),
@@ -157,6 +210,19 @@ impl PopupFamily {
     });
     if let Ok(mut popups) = self.popups.lock() {
       popups.push(popup);
+      drop(popups);
+      if surface && let Some(handler) = &self.surface_handler {
+        let url = browser
+          .main_frame()
+          .map(|frame| CefString::from(&frame.url()).to_string())
+          .unwrap_or_default();
+        handler(SurfacePopupEvent::Created {
+          browser_id,
+          opener_id: host.opener_identifier(),
+          token,
+          url,
+        });
+      }
     } else {
       state.close();
       host.close_browser(1);
@@ -168,6 +234,18 @@ impl PopupFamily {
   pub(crate) fn closed(&self, state: &FrameNavigationState, browser_id: i32) {
     if !state.has_browser_id(browser_id) {
       return;
+    }
+    let surface = self
+      .popups
+      .lock()
+      .map(|popups| {
+        popups
+          .iter()
+          .any(|popup| popup.surface && popup.state.is_same_browser(state))
+      })
+      .unwrap_or(false);
+    if surface && let Some(handler) = &self.surface_handler {
+      handler(SurfacePopupEvent::Closed { browser_id });
     }
     state.close();
     let root_closed = self.root.is_same_browser(state);
@@ -404,7 +482,7 @@ mod tests {
   #[test]
   fn pending_popups_are_bounded_and_retained_until_exact_creation_or_abort() {
     let root = created(1);
-    let family = PopupFamily::new(root.clone());
+    let family = PopupFamily::new(root.clone(), None);
     let first = family.reserve(&root, 1, 7).unwrap();
     assert!(family.reserve(&root, 1, 7).is_none());
     assert!(family.abort(&created(1), 7).is_none());
@@ -421,7 +499,7 @@ mod tests {
   #[test]
   fn teardown_revokes_a_family_still_holding_an_unresolved_reservation() {
     let root = created(1);
-    let family = PopupFamily::new(root.clone());
+    let family = PopupFamily::new(root.clone(), None);
     // CEF discarded this popup without ever creating or aborting it.
     let request = family.reserve(&root, 1, 7).unwrap();
     assert!(!family.is_revoked());
@@ -439,7 +517,7 @@ mod tests {
   #[test]
   fn popup_admission_requires_the_live_exact_native_opener() {
     let root = created(1);
-    let family = PopupFamily::new(root.clone());
+    let family = PopupFamily::new(root.clone(), None);
     assert!(family.admits(&root, 1));
     assert!(!family.admits(&root, 2));
     assert!(!family.admits(&created(1), 1));
@@ -455,7 +533,7 @@ mod tests {
     // A root that never observed a native frame event has no browser identity.
     let root = FrameNavigationState::new();
     assert!(!root.has_browser_id(1));
-    let family = PopupFamily::new(root.clone());
+    let family = PopupFamily::new(root.clone(), None);
     // The per-browser native callback cannot match an unobserved identity.
     family.closed(&root, 1);
     assert!(!family.closing.load(Ordering::Acquire));

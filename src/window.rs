@@ -1036,7 +1036,18 @@ impl<T: UserEvent> WinitCefApp<T> {
         let _ = tx.send(Ok(is_on_top));
       }
       WindowMessage::Title(tx) => _ = tx.send(Ok(window.title())),
-      WindowMessage::InnerPosition(tx) => _ = tx.send(Ok(window.surface_position())),
+      WindowMessage::InnerPosition(tx) => {
+        // Winit reports the surface offset relative to the outer window; Tauri
+        // exposes the content origin in desktop coordinates.
+        let position = window
+          .outer_position()
+          .map(|outer| {
+            let offset = window.surface_position();
+            PhysicalPosition::new(outer.x + offset.x, outer.y + offset.y)
+          })
+          .map_err(|_| Error::FailedToGetMonitor);
+        let _ = tx.send(position);
+      }
       WindowMessage::OuterPosition(tx) => {
         let pos = window
           .outer_position()
@@ -1144,7 +1155,16 @@ impl<T: UserEvent> WinitCefApp<T> {
         appwindow.apply_movability();
       }
       WindowMessage::SetSize(size) => _ = window.request_surface_size(size),
-      WindowMessage::SetPosition(position) => window.set_outer_position(position),
+      WindowMessage::SetPosition(position) => {
+        // macOS desktop coordinates use each display's scale. Winit converts
+        // physical positions using the window's current display, which can
+        // halve a restored position when moving from Retina to a 1x display.
+        #[cfg(target_os = "macos")]
+        let position = find_monitor_for_position(event_loop.available_monitors(), position)
+          .map(|monitor| Position::Logical(position.to_logical::<f64>(monitor.scale_factor())))
+          .unwrap_or(position);
+        window.set_outer_position(position);
+      }
       WindowMessage::SetFullscreen(value) => {
         appwindow.request_window_fullscreen(value.then_some(FullscreenTarget::CurrentMonitor))
       }

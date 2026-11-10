@@ -511,6 +511,7 @@ pub(crate) struct AppWebview {
   pub(crate) devtools_enabled: bool,
   pub(crate) bounds_rate: Option<BoundsRate>,
   pub(crate) offscreen: Option<crate::OffscreenView>,
+  pub(crate) surface_embed_parent: Option<cef::Browser>,
   pub(crate) page_fullscreen: PageFullscreen,
 }
 
@@ -527,6 +528,10 @@ pub(crate) enum PageFullscreen {
 
 impl AppWebview {
   fn resize(&self, scale: f64, x: i32, y: i32, width: i32, height: i32) {
+    if self.surface_embed_parent.is_some() {
+      log::error!("SurfaceEmbed guest geometry must be set on the host embed element");
+      return;
+    }
     if let Some(view) = &self.offscreen {
       *view.bounds.lock().unwrap_or_else(|e| e.into_inner()) = Rect {
         position: tauri_runtime::dpi::LogicalPosition::new(x as f64 / scale, y as f64 / scale)
@@ -562,12 +567,28 @@ impl AppWebview {
       });
     }
 
+    if self.surface_embed_parent.is_some() {
+      log::error!("SurfaceEmbed guest geometry must be set on the host embed element");
+      return;
+    }
     self.host.notify_move_or_resize_started();
     self.resize(scale, x, y, w, h);
     self.host.was_resized();
   }
 
   pub(crate) fn set_visible(&self, visible: bool) {
+    if let Some(owner) = &self.surface_embed_parent {
+      if let Some(frame) = owner.main_frame() {
+        let token = cef::CefString::from(&self.host.surface_embed_token()).to_string();
+        let token = serde_json::to_string(&token).expect("serializable token");
+        let display = if visible { "" } else { "none" };
+        let script = format!(
+          "for(const e of document.querySelectorAll('embed')){{if(e.dataset.contentId==={token})e.style.display='{display}'}}"
+        );
+        frame.execute_java_script(Some(&script.as_str().into()), None, 0);
+      }
+      return;
+    }
     self.host.was_hidden(if visible { 0 } else { 1 });
     if let Some(view) = &self.offscreen {
       view.visible.store(visible, Ordering::Relaxed);
@@ -656,6 +677,32 @@ impl<T: UserEvent> WinitCefApp<T> {
     let scale = appwindow.window.scale_factor();
     let app_wide_theme = *context.app_wide_theme.lock().unwrap();
     let theme = appwindow.resolved_theme(app_wide_theme);
+    let surface_embed_parent = match &pending.runtime_specific_attributes.surface_embed_parent {
+      Some(label) => {
+        if !cfg!(feature = "surface-embed") {
+          return Err(Error::CreateWebview(
+            "SurfaceEmbed requires the surface-embed build feature".into(),
+          ));
+        }
+        if offscreen.is_some() {
+          return Err(Error::CreateWebview(
+            "SurfaceEmbed cannot use offscreen rendering".into(),
+          ));
+        }
+        Some(
+          appwindow
+            .children
+            .iter()
+            .find(|child| &child.label == label)
+            .ok_or_else(|| {
+              Error::CreateWebview("SurfaceEmbed parent must be in the same window".into())
+            })?
+            .browser
+            .clone(),
+        )
+      }
+      None => None,
+    };
     let Some(child) = Self::build_browser_child(
       context,
       scheme_registry,
@@ -667,6 +714,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       theme,
       drag_drop_event_target,
       offscreen,
+      surface_embed_parent,
       pending,
     ) else {
       return Err(Error::CreateWebview(
@@ -703,14 +751,19 @@ impl<T: UserEvent> WinitCefApp<T> {
     theme: Option<Theme>,
     drag_drop_event_target: browser_client::DragDropEventTarget,
     offscreen: Option<crate::OffscreenView>,
+    surface_embed_parent: Option<cef::Browser>,
     mut pending: PendingWebview<T, CefRuntime<T>>,
   ) -> Option<AppWebview> {
-    let bounds_rate = compute_child_bounds_rate(
-      pending.webview_attributes.bounds.as_ref(),
-      pending.webview_attributes.auto_resize,
-      parent_size,
-      scale,
-    );
+    let bounds_rate = if surface_embed_parent.is_some() {
+      None
+    } else {
+      compute_child_bounds_rate(
+        pending.webview_attributes.bounds.as_ref(),
+        pending.webview_attributes.auto_resize,
+        parent_size,
+        scale,
+      )
+    };
     let devtools_enabled = context.devtools_allowed
       && (cfg!(debug_assertions) || cfg!(feature = "devtools"))
       && pending.webview_attributes.devtools.unwrap_or(true);
@@ -732,7 +785,9 @@ impl<T: UserEvent> WinitCefApp<T> {
       );
     }
 
-    let initialization_scripts = initialization_scripts(&mut pending.webview_attributes);
+    let browser_content = pending.runtime_specific_attributes.browser_content;
+    let initialization_scripts =
+      initialization_scripts(&mut pending.webview_attributes, browser_content);
     let uri_scheme_protocols: Arc<HashMap<_, _>> = Arc::new(
       pending
         .uri_scheme_protocols
@@ -757,6 +812,10 @@ impl<T: UserEvent> WinitCefApp<T> {
     let frame_navigation_state = crate::FrameNavigationState::new();
     let popup_family = Arc::new(crate::popup::PopupFamily::new(
       frame_navigation_state.clone(),
+      pending
+        .runtime_specific_attributes
+        .surface_popup_handler
+        .clone(),
     ));
     let dialogs = crate::dialog::DialogState::new(frame_navigation_state.clone());
     let frame_state_for_events = frame_navigation_state.clone();
@@ -778,7 +837,11 @@ impl<T: UserEvent> WinitCefApp<T> {
           handler(event);
         }
       })),
-      ipc_handler: pending.ipc_handler.map(Arc::from),
+      ipc_handler: if browser_content {
+        None
+      } else {
+        pending.ipc_handler.map(Arc::from)
+      },
       on_page_load_handler,
       document_title_changed_handler,
       navigation_handler: pending.navigation_handler.map(Arc::from),
@@ -799,6 +862,7 @@ impl<T: UserEvent> WinitCefApp<T> {
         webview_id,
         label: pending.label.clone(),
         initial_url: Some(pending.url.as_str().to_string()),
+        is_surface_guest: surface_embed_parent.is_some(),
         devtools_enabled,
         zoom_hotkeys_enabled,
         allowed_chrome_commands,
@@ -894,14 +958,26 @@ impl<T: UserEvent> WinitCefApp<T> {
         // Create with an inert document so the BrowserHost exists before the real
         // navigation; the real URL is loaded once the document-start script is set.
         let initial_url = CefString::from(INITIAL_LOAD_URL);
-        let Some(browser) = cef::browser_host_create_browser_sync(
-          Some(&window_info),
-          Some(&mut client),
-          Some(&initial_url),
-          Some(&settings),
-          None,
-          request_context.as_mut(),
-        ) else {
+        let created = if let Some(owner) = &surface_embed_parent {
+          owner.host().and_then(|host| {
+            host.create_surface_guest_sync(
+              Some(&mut client),
+              Some(&initial_url),
+              Some(&settings),
+              None,
+            )
+          })
+        } else {
+          cef::browser_host_create_browser_sync(
+            Some(&window_info),
+            Some(&mut client),
+            Some(&initial_url),
+            Some(&settings),
+            None,
+            request_context.as_mut(),
+          )
+        };
+        let Some(browser) = created else {
           log::error!("failed to create CEF browser for webview {label:?}");
           return;
         };
@@ -971,6 +1047,7 @@ impl<T: UserEvent> WinitCefApp<T> {
             devtools_enabled,
             bounds_rate,
             offscreen,
+            surface_embed_parent,
             page_fullscreen: Default::default(),
           })
           .expect("failed to send initialized CEF browser");
@@ -1121,7 +1198,12 @@ impl<T: UserEvent> WinitCefApp<T> {
       }
       WebviewMessage::Reparent(target_window_id, tx) => {
         // CEF fixes an OSR browser's native dialog parent at creation.
-        if appwindow.children[child_index].offscreen.is_some() && window_id != target_window_id {
+        if (appwindow.children[child_index].offscreen.is_some()
+          || appwindow.children[child_index]
+            .surface_embed_parent
+            .is_some())
+          && window_id != target_window_id
+        {
           let _ = tx.send(Err(Error::CreateWebview(
             "offscreen webviews cannot be reparented".into(),
           )));
@@ -1498,6 +1580,13 @@ pub enum RuntimeStyle {
 pub struct CefWebviewAttributes {
   /// Windowless rendering and application-provided CEF callbacks.
   pub offscreen: Option<crate::Offscreen>,
+  /// Experimental live surface guest owned by this same-window webview label.
+  /// Size and position are controlled by the host embed element's CSS.
+  pub surface_embed_parent: Option<String>,
+  /// Ordinary browser content receives no application scripts or IPC bridge.
+  pub browser_content: bool,
+  /// Opt in to separate popup lifecycle and CDP notifications for surface guests.
+  pub surface_popup_handler: Option<Arc<crate::SurfacePopupHandler>>,
   /// The browser runtime style, see [`RuntimeStyle`]. CEF picks one when not set.
   pub runtime_style: Option<RuntimeStyle>,
   /// Observer of the native lifecycle events of every frame of the webview.
@@ -1533,6 +1622,12 @@ impl std::fmt::Debug for CefWebviewAttributes {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     formatter
       .debug_struct("CefWebviewAttributes")
+      .field("surface_embed_parent", &self.surface_embed_parent)
+      .field("browser_content", &self.browser_content)
+      .field(
+        "surface_popup_handler",
+        &self.surface_popup_handler.is_some(),
+      )
       .field("runtime_style", &self.runtime_style)
       .field("offscreen", &self.offscreen.is_some())
       .field("frame_event_handler", &self.frame_event_handler.is_some())
@@ -1592,7 +1687,13 @@ fn is_alloy_style(runtime_style: Option<RuntimeStyle>) -> bool {
   cfg!(target_os = "macos") || matches!(runtime_style, Some(RuntimeStyle::Alloy))
 }
 
-pub(crate) fn initialization_scripts(attrs: &mut WebviewAttributes) -> Arc<Vec<CefInitScript>> {
+pub(crate) fn initialization_scripts(
+  attrs: &mut WebviewAttributes,
+  browser_content: bool,
+) -> Arc<Vec<CefInitScript>> {
+  if browser_content {
+    return Arc::default();
+  }
   let mut initialization_scripts = Vec::new();
 
   if attrs.drag_drop_handler_enabled {
@@ -2496,5 +2597,22 @@ mod tests {
       browser_settings_from_webview_attributes(&attributes).background_color,
       0xFF01_0203
     );
+  }
+}
+
+#[cfg(test)]
+mod browser_content_tests {
+  #[test]
+  fn ordinary_websites_do_not_receive_application_scripts() {
+    let mut attrs =
+      tauri_runtime::webview::WebviewAttributes::new(tauri_utils::config::WebviewUrl::default());
+    attrs
+      .initialization_scripts
+      .push(tauri_runtime::webview::InitializationScript {
+        script: "window.appSecret = true".into(),
+        for_main_frame_only: true,
+      });
+    assert!(super::initialization_scripts(&mut attrs, true).is_empty());
+    assert!(!super::initialization_scripts(&mut attrs, false).is_empty());
   }
 }

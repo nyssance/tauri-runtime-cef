@@ -49,30 +49,38 @@ mod tests {
 // when there is a network service crash:
 // "[85296:47750637:0127/131203.017395:ERROR:content/browser/network_service_instance_impl.cc:610] Network service crashed or was terminated, restarting service."
 // We check the app URL for a while until it actually loads the initial URL.
-fn check_and_reload_if_blank(browser: cef::Browser, initial_url: String) {
+fn check_and_reload_if_blank<T: UserEvent>(
+  context: RuntimeContext<T>,
+  webview_id: u32,
+  initial_url: String,
+) {
   if initial_url == "about:blank" {
     return;
   }
 
+  // Never retain a CEF browser across a sleeping background task: a quick
+  // application quit must release every request context before CefShutdown.
+  // Resolve the id on the UI thread only while the webview is still live.
   std::thread::spawn(move || {
-    std::thread::sleep(std::time::Duration::from_secs(1));
-
-    let start_time = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(5);
-    let check_interval = std::time::Duration::from_millis(100);
-
-    while start_time.elapsed() < timeout {
-      if let Some(frame) = browser.main_frame() {
-        let url = frame.url();
-        let current_url = cef::CefString::from(&url).to_string();
-        if current_url.is_empty() || current_url == "about:blank" {
-          frame.load_url(Some(&cef::CefString::from(initial_url.as_str())));
-          // Continue checking in case it loads about:blank again.
-        } else {
-          return;
-        }
+    use std::time::{Duration, Instant};
+    std::thread::sleep(Duration::from_secs(1));
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+      let (reply, result) = std::sync::mpsc::channel();
+      if context
+        .send_message(Message::CheckInitialNavigation {
+          webview_id,
+          initial_url: initial_url.clone(),
+          reply,
+        })
+        .is_err()
+      {
+        return;
       }
-      std::thread::sleep(check_interval);
+      if !matches!(result.recv_timeout(Duration::from_secs(1)), Ok(true)) {
+        return;
+      }
+      std::thread::sleep(Duration::from_millis(100));
     }
   });
 }
@@ -87,6 +95,7 @@ wrap_with_args! {
     context: RuntimeContext<T>,
     new_window_handler: Option<Arc<tauri_runtime::webview::NewWindowHandler<T, CefRuntime<T>>>>,
     initial_url: Option<String>,
+    is_surface_guest: bool,
     frame_navigation_state: crate::FrameNavigationState,
     popup_family: Weak<crate::popup::PopupFamily>,
     opener: Option<crate::popup::PopupRequest>,
@@ -109,7 +118,7 @@ wrap_with_args! {
         && browser.is_popup() == 0
         && let Some(initial_url) = &self.initial_url
       {
-        check_and_reload_if_blank(browser.clone(), initial_url.clone());
+        check_and_reload_if_blank(self.context.clone(), self.webview_id, initial_url.clone());
       }
     }
 
@@ -215,6 +224,12 @@ wrap_with_args! {
     /// completes the close itself.
     fn do_close(&self, browser: Option<&mut Browser>) -> std::os::raw::c_int {
       if browser.as_ref().is_none_or(|browser| browser.is_popup() != 0) {
+        return 0;
+      }
+      // The attachment token can disappear during owner teardown, before
+      // do_close runs. Use the creation mode, not a live connector lookup:
+      // a surface guest never has a native child window to destroy.
+      if self.is_surface_guest {
         return 0;
       }
       if browser

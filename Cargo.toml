@@ -46,6 +46,7 @@ targets = [
 ]
 
 [features]
+surface-embed = ["cef/surface-embed", "cef-dll-sys/surface-embed"]
 default = []
 devtools = [
     "tauri-runtime/devtools",
@@ -66,14 +67,14 @@ harness = false
 version = "0.22"
 
 [dependencies.cef]
-version = "=154.5.0"
+version = "=156.4.0"
 features = [
     "build-util",
     "linux-x11",
 ]
 
 [dependencies.cef-dll-sys]
-version = "=154.5.0"
+version = "=156.4.0"
 default-features = false
 
 [dependencies.dioxus-debug-cell]

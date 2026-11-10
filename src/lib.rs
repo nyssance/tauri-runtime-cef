@@ -27,6 +27,7 @@ mod offscreen;
 pub use offscreen::{CursorHandler, Offscreen, OffscreenView};
 mod platform;
 mod popup;
+pub use popup::{SurfacePopupEvent, SurfacePopupHandler};
 mod runtime;
 // `SandboxPolicy` itself is public API and lives in `runtime`; this module holds the
 // decision behind it.

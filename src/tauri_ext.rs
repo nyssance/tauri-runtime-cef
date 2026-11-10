@@ -412,6 +412,22 @@ where
 /// CEF-specific APIs of [`tauri::webview::WebviewBuilder`].
 #[cfg(feature = "unstable")]
 pub trait WebviewBuilderCefExt {
+  /// Create a live SurfaceEmbed guest; the named parent must be in the same window.
+  #[must_use]
+  fn surface_embed_parent(self, label: impl Into<String>) -> Self;
+
+  /// Treat the document as an ordinary website: disable application initialization
+  /// scripts and IPC. Native navigation, lifecycle and DevTools remain available.
+  #[must_use]
+  fn browser_content(self) -> Self;
+
+  /// Observe embedded popup descendants separately from this webview's own CDP.
+  #[must_use]
+  fn on_surface_popup<F: Fn(crate::SurfacePopupEvent) + Send + Sync + 'static>(
+    self,
+    handler: F,
+  ) -> Self;
+
   /// Sets the browser runtime style.
   ///
   /// See [`RuntimeStyle`] for more information.
@@ -474,6 +490,30 @@ impl<R: Runtime> WebviewBuilderCefExt for tauri::webview::WebviewBuilder<R>
 where
   R::RuntimeWebviewAttributes: AsCefWebviewAttributes,
 {
+  fn on_surface_popup<F: Fn(crate::SurfacePopupEvent) + Send + Sync + 'static>(
+    mut self,
+    handler: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.surface_popup_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn browser_content(mut self) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.browser_content = true;
+    });
+    self
+  }
+
+  fn surface_embed_parent(mut self, label: impl Into<String>) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.surface_embed_parent = Some(label.into());
+    });
+    self
+  }
+
   fn browser_runtime_style(mut self, style: RuntimeStyle) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.runtime_style = Some(style);

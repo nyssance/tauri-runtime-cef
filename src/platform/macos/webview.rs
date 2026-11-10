@@ -36,7 +36,7 @@ impl AppWebview {
   }
 
   pub(crate) fn set_background_color(&self, color: Option<Color>) {
-    if self.offscreen.is_some() {
+    if self.offscreen.is_some() || self.surface_embed_parent.is_some() {
       return;
     }
     let nsview = self.nsview();

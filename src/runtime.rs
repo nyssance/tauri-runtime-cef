@@ -1507,6 +1507,11 @@ pub(crate) type AfterWindowCreationCallback = Box<dyn for<'a> Fn(RawWindow<'a>) 
 pub(crate) enum Message<T: UserEvent> {
   EventLoop(EventLoopMessage),
   BrowserClosed(WindowId, u32),
+  CheckInitialNavigation {
+    webview_id: u32,
+    initial_url: String,
+    reply: Sender<bool>,
+  },
   PopupPending(crate::popup::PopupRequest, Arc<crate::popup::PopupFamily>),
   PopupCreated(
     crate::popup::PopupRequest,
@@ -1805,6 +1810,24 @@ impl<T: UserEvent> WinitCefApp<T> {
 
   fn handle_message(&mut self, event_loop: &dyn ActiveEventLoop, message: Message<T>) {
     match message {
+      Message::CheckInitialNavigation { webview_id, initial_url, reply } => {
+        let retry = !self.state.exiting && self.state.windows.values()
+          .flat_map(|window| window.children.iter())
+          .find(|child| child.webview_id == webview_id)
+          .is_some_and(|child| {
+            let Some(frame) = child.browser.main_frame() else {
+              return true;
+            };
+            let url = CefString::from(&frame.url()).to_string();
+            if url.is_empty() || url == "about:blank" {
+              frame.load_url(Some(&CefString::from(initial_url.as_str())));
+              true
+            } else {
+              false
+            }
+          });
+        let _ = reply.send(retry);
+      }
       Message::EventLoop(message) => self.handle_event_loop_message(event_loop, message),
       Message::PopupPending(request, family) => {
         self.state.pending_popups.push((request, family));

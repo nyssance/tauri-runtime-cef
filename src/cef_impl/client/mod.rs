@@ -83,6 +83,7 @@ wrap_with_args! {
     pub(crate) webview_id: u32,
     pub(crate) label: String,
     initial_url: Option<String>,
+    is_surface_guest: bool,
     devtools_enabled: bool,
     zoom_hotkeys_enabled: bool,
     allowed_chrome_commands: Vec<crate::ChromeCommandGroup>,
@@ -151,12 +152,15 @@ wrap_with_args! {
       let family = self.popup_family.clone();
       let create_popup: Arc<life_span::PopupClientFactory> = Arc::new(move |opener, state| {
         let events = state.clone();
+        let title_state = state.clone();
+        let title_family = family.clone();
         TauriCefBrowserClient::build(TauriCefBrowserClientArgs {
           context: context.clone(),
           window_id,
           webview_id,
           label: label.clone(),
           initial_url: None,
+          is_surface_guest: false,
           devtools_enabled,
           zoom_hotkeys_enabled,
           allowed_chrome_commands: allowed_chrome_commands.clone(),
@@ -203,7 +207,7 @@ wrap_with_args! {
             console_message_handler: None,
             ipc_handler: None,
             on_page_load_handler: None,
-            document_title_changed_handler: None,
+            document_title_changed_handler: Some(Arc::new(move |title| { if let Some(family) = title_family.upgrade() { family.title(&title_state, title); } })),
             web_content_process_terminate_handler: None,
           },
           sender: context.sender.clone(),
@@ -216,6 +220,7 @@ wrap_with_args! {
         context: self.context.clone(),
         new_window_handler: self.handlers.new_window_handler.clone(),
         initial_url: self.initial_url.clone(),
+        is_surface_guest: self.is_surface_guest,
         frame_navigation_state: self.frame_navigation_state.clone(),
         popup_family: self.popup_family.clone(),
         opener: self.opener.clone(),
