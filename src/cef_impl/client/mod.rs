@@ -18,6 +18,7 @@ mod context_menu;
 mod display;
 mod download;
 mod drag;
+mod find;
 mod frame;
 mod keyboard;
 mod life_span;
@@ -37,6 +38,7 @@ pub(crate) use drag::{
 use keyboard::TauriCefKeyboardHandler;
 use life_span::{TauriCefChildLifeSpanHandler, TauriCefChildLifeSpanHandlerArgs};
 use load::TauriCefLoadHandler;
+pub use permission::{PermissionAnswer, answer_permission_request};
 pub(crate) use permission::PermissionRequestHandler;
 use permission::TauriCefPermissionHandler;
 pub(crate) use process::TauriCefBrowserProcessHandler;
@@ -54,6 +56,7 @@ pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
   pub(crate) console_message_handler: Option<Arc<crate::ConsoleMessageHandler>>,
   pub(crate) browser_status_handler: Option<Arc<crate::BrowserStatusHandler>>,
   pub(crate) shortcut_filter: Option<Arc<crate::ShortcutFilter>>,
+  pub(crate) prompt_permissions: bool,
   pub(crate) permission_request_handler: Option<Arc<PermissionRequestHandler>>,
   pub(crate) web_content_process_terminate_handler:
     Option<Arc<tauri_runtime::webview::OnWebContentProcessTerminateHandler>>,
@@ -72,6 +75,7 @@ impl<T: UserEvent> Clone for TauriCefBrowserClientHandlers<T> {
       console_message_handler: self.console_message_handler.clone(),
       browser_status_handler: self.browser_status_handler.clone(),
       shortcut_filter: self.shortcut_filter.clone(),
+      prompt_permissions: self.prompt_permissions,
       permission_request_handler: self.permission_request_handler.clone(),
       web_content_process_terminate_handler: self.web_content_process_terminate_handler.clone(),
     }
@@ -167,6 +171,7 @@ wrap_with_args! {
       let download_handler = self.handlers.download_handler.clone();
       let permission_request_handler = self.handlers.permission_request_handler.clone();
       let shortcut_filter = self.handlers.shortcut_filter.clone();
+      let prompt_permissions = self.handlers.prompt_permissions;
       let family = self.popup_family.clone();
       let create_popup: Arc<life_span::PopupClientFactory> = Arc::new(move |opener, state| {
         let events = state.clone();
@@ -233,6 +238,7 @@ wrap_with_args! {
               }
             })),
             shortcut_filter: shortcut_filter.clone(),
+            prompt_permissions,
             ipc_handler: None,
             on_page_load_handler: None,
             document_title_changed_handler: Some(Arc::new(move |title| { if let Some(family) = title_family.upgrade() { family.title(&title_state, title); } })),
@@ -311,7 +317,16 @@ wrap_with_args! {
     fn permission_handler(&self) -> Option<PermissionHandler> {
       Some(TauriCefPermissionHandler::new(
         self.handlers.permission_request_handler.clone(),
+        self
+          .handlers
+          .prompt_permissions
+          .then(|| self.scoped_status())
+          .flatten(),
       ))
+    }
+
+    fn find_handler(&self) -> Option<FindHandler> {
+      self.scoped_status().map(find::TauriCefFindHandler::new)
     }
 
     fn on_process_message_received(

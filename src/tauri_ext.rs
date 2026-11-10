@@ -439,10 +439,18 @@ pub trait WebviewBuilderCefExt {
   /// Claim chords before page content, for this webview and its popups.
   /// Requires a status observer, which receives each claimed chord.
   #[must_use]
-  fn browser_shortcuts<F: Fn(crate::KeyChord) -> bool + Send + Sync + 'static>(
+  fn browser_shortcuts<F: Fn(crate::KeyChord) -> crate::ShortcutClaim + Send + Sync + 'static>(
     self,
     filter: F,
   ) -> Self;
+
+  /// Hand permission requests of this webview and its popups to the status
+  /// observer as [`BrowserStatus::PermissionRequest`](crate::BrowserStatus),
+  /// instead of the runtime style's default, which shows no prompt for an
+  /// embedded browser and may grant silently. Requests the webview's own
+  /// permission handler answers are not offered.
+  #[must_use]
+  fn prompt_permissions(self) -> Self;
 
   /// Sets the browser runtime style.
   ///
@@ -526,7 +534,14 @@ where
     self
   }
 
-  fn browser_shortcuts<F: Fn(crate::KeyChord) -> bool + Send + Sync + 'static>(
+  fn prompt_permissions(mut self) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.prompt_permissions = true;
+    });
+    self
+  }
+
+  fn browser_shortcuts<F: Fn(crate::KeyChord) -> crate::ShortcutClaim + Send + Sync + 'static>(
     mut self,
     filter: F,
   ) -> Self {

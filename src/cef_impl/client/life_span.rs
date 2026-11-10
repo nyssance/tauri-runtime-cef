@@ -253,6 +253,7 @@ wrap_with_args! {
 
     fn on_before_close(&self, browser: Option<&mut Browser>) {
       let Some(browser) = browser else { return; };
+      super::permission::forget_browser(browser.identifier());
       if let Some(family) = self.popup_family.upgrade() {
         family.closed(&self.frame_navigation_state, browser.identifier());
       }

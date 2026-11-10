@@ -31,7 +31,7 @@ wrap_keyboard_handler! {
       if let (Some(filter), Some(status), Some(browser), Some(event)) =
         (&self.shortcut_filter, &self.status, _browser.as_deref(), event)
         && let Some(chord) = chord(event)
-        && filter(chord)
+        && filter(chord) == crate::ShortcutClaim::Claim
       {
         status(browser.identifier(), crate::BrowserStatus::Shortcut(chord));
         return 1;
@@ -94,6 +94,24 @@ wrap_keyboard_handler! {
         }
       }
 
+      0
+    }
+
+    /// Reached only for a key the page left unhandled.
+    fn on_key_event(
+      &self,
+      browser: Option<&mut Browser>,
+      event: Option<&KeyEvent>,
+      _os_event: CefOsEvent<'_>,
+    ) -> ::std::os::raw::c_int {
+      if let (Some(filter), Some(status), Some(browser), Some(event)) =
+        (&self.shortcut_filter, &self.status, browser.as_deref(), event)
+        && let Some(chord) = chord(event)
+        && filter(chord) == crate::ShortcutClaim::ClaimIfUnhandled
+      {
+        status(browser.identifier(), crate::BrowserStatus::Shortcut(chord));
+        return 1;
+      }
       0
     }
   }

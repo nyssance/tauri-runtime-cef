@@ -864,6 +864,7 @@ impl<T: UserEvent> WinitCefApp<T> {
         .runtime_specific_attributes
         .shortcut_filter
         .clone(),
+      prompt_permissions: pending.runtime_specific_attributes.prompt_permissions,
       console_message_handler: pending
         .runtime_specific_attributes
         .console_message_handler
@@ -1610,6 +1611,8 @@ pub struct CefWebviewAttributes {
   /// Chords the embedder claims before page content. Shared with the popups
   /// this webview opens; a claimed chord is reported as a browser status.
   pub shortcut_filter: Option<Arc<crate::ShortcutFilter>>,
+  /// Offer unanswered permission requests to the status observer.
+  pub prompt_permissions: bool,
   /// The browser runtime style, see [`RuntimeStyle`]. CEF picks one when not set.
   pub runtime_style: Option<RuntimeStyle>,
   /// Observer of the native lifecycle events of every frame of the webview.

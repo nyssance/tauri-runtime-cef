@@ -179,9 +179,138 @@ enum AppDecision {
   NoOpinion,
 }
 
+/// The user's answer to a permission request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionAnswer {
+  /// Granted, and remembered for the origin.
+  Allow,
+  /// Refused, and remembered for the origin.
+  Deny,
+  /// Left unanswered: nothing is granted and nothing is remembered, so the
+  /// origin may ask again.
+  Dismiss,
+}
+
+/// A request the embedder was asked about and has not answered yet.
+enum PendingAnswer {
+  Prompt(PermissionPromptCallback),
+  Media {
+    callback: MediaAccessCallback,
+    browser: Browser,
+    origin: Option<String>,
+    requested: u32,
+  },
+}
+
+struct PendingRequest {
+  browser_id: i32,
+  /// CEF's own identifier, for the prompt path's dismissal callback.
+  prompt_id: Option<u64>,
+  answer: PendingAnswer,
+}
+
+/// Only ever touched on CEF's UI thread: requests arrive there, and
+/// [`answer_permission_request`] requires it.
+struct PendingRequests(std::collections::HashMap<u64, PendingRequest>);
+// SAFETY: the map is confined to the UI thread, as documented above. The mutex
+// exists to satisfy `static`, never to share the callbacks across threads.
+unsafe impl Send for PendingRequests {}
+
+static PENDING: std::sync::Mutex<Option<PendingRequests>> = std::sync::Mutex::new(None);
+static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn with_pending<T>(action: impl FnOnce(&mut std::collections::HashMap<u64, PendingRequest>) -> T) -> T {
+  let mut pending = PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+  action(&mut pending.get_or_insert_with(|| PendingRequests(Default::default())).0)
+}
+
+fn remember(request: PendingRequest) -> u64 {
+  let id = NEXT_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  with_pending(|pending| pending.insert(id, request));
+  id
+}
+
+/// Answer a [`BrowserStatus::PermissionRequest`](crate::BrowserStatus). Must be
+/// called on the UI thread. Returns `false` when the request is no longer
+/// pending.
+///
+/// An accepted prompt is persisted for its origin by Chromium, exactly as a
+/// click on a browser's own Allow button. Camera and microphone are granted for
+/// the request and recorded as content settings; the desktop is never granted
+/// from here.
+pub fn answer_permission_request(id: u64, answer: PermissionAnswer) -> bool {
+  let Some(request) = with_pending(|pending| pending.remove(&id)) else {
+    return false;
+  };
+  let allow = answer == PermissionAnswer::Allow;
+  match request.answer {
+    PendingAnswer::Prompt(callback) => callback.cont(match answer {
+      PermissionAnswer::Allow => PermissionRequestResult::ACCEPT,
+      PermissionAnswer::Deny => PermissionRequestResult::DENY,
+      PermissionAnswer::Dismiss => PermissionRequestResult::DISMISS,
+    }),
+    PendingAnswer::Media {
+      callback,
+      browser,
+      origin,
+      requested,
+    } => {
+      let allowed = if allow {
+        requested & ALLOY_MEDIA_PERMISSIONS
+      } else {
+        0
+      };
+      if allowed != 0 {
+        let origin = origin.as_deref().map(CefString::from);
+        allow_content_settings(
+          browser.host().as_ref(),
+          origin.as_ref(),
+          &media_content_settings(allowed),
+        );
+      }
+      callback.cont(allowed);
+    }
+  }
+  true
+}
+
+/// A browser that closes takes its unanswered requests with it.
+pub(crate) fn forget_browser(browser_id: i32) {
+  let dropped = with_pending(|pending| {
+    let ids: Vec<u64> = pending
+      .iter()
+      .filter(|(_, request)| request.browser_id == browser_id)
+      .map(|(id, _)| *id)
+      .collect();
+    ids
+      .into_iter()
+      .filter_map(|id| pending.remove(&id))
+      .collect::<Vec<_>>()
+  });
+  for request in dropped {
+    if let PendingAnswer::Media { callback, .. } = request.answer {
+      callback.cancel();
+    }
+  }
+}
+
+fn kinds(requested: u32, kind: fn(u32) -> PermissionKind) -> Vec<PermissionKind> {
+  let mut kinds = Vec::new();
+  for permission in requested_permissions(requested) {
+    let kind = kind(permission);
+    if !kinds.contains(&kind) {
+      kinds.push(kind);
+    }
+  }
+  kinds
+}
+
 wrap_permission_handler! {
   pub struct TauriCefPermissionHandler {
     permission_request_handler: Option<Arc<PermissionRequestHandler>>,
+    // When set, a request the application left unanswered is offered to the
+    // embedder's status observer instead of the runtime style's default.
+    prompts: Option<Arc<crate::browser_status::ScopedStatus>>,
   }
 
   impl PermissionHandler {
@@ -225,6 +354,36 @@ wrap_permission_handler! {
           1
         }
         AppDecision::NoOpinion => {
+          // The embedder prompts: nothing is granted until it answers. A desktop
+          // capture request is never the embedder's to grant; see below.
+          if let (Some(prompts), Some(browser), Some(callback)) =
+            (&self.prompts, host.as_ref().and_then(|host| host.browser()), callback.as_deref())
+            && !grants_desktop_capture(requested_permissions)
+            && requested_permissions & ALLOY_MEDIA_PERMISSIONS != 0
+          {
+            let browser_id = browser.identifier();
+            let origin = requesting_origin.map(ToString::to_string);
+            let id = remember(PendingRequest {
+              browser_id,
+              prompt_id: None,
+              answer: PendingAnswer::Media {
+                callback: callback.clone(),
+                browser,
+                origin: origin.clone(),
+                requested: requested_permissions,
+              },
+            });
+            prompts(
+              browser_id,
+              crate::BrowserStatus::PermissionRequest {
+                id,
+                origin: origin.unwrap_or_default(),
+                kinds: kinds(requested_permissions, media_permission_kind),
+              },
+            );
+            return 1;
+          }
+
           // Chrome style displays the permission request UI and records the outcome as a
           // content setting. That content setting is what keeps `enumerateDevices()` from
           // returning a redacted device list, so let CEF handle the request.
@@ -263,8 +422,8 @@ wrap_permission_handler! {
     fn on_show_permission_prompt(
       &self,
       browser: Option<&mut Browser>,
-      _prompt_id: u64,
-      _requesting_origin: Option<&CefString>,
+      prompt_id: u64,
+      requesting_origin: Option<&CefString>,
       requested_permissions: u32,
       callback: Option<&mut PermissionPromptCallback>,
     ) -> ::std::os::raw::c_int {
@@ -293,6 +452,27 @@ wrap_permission_handler! {
           1
         }
         AppDecision::NoOpinion => {
+          // The embedder prompts: nothing is granted until it answers.
+          if let (Some(prompts), Some(browser), Some(callback)) =
+            (&self.prompts, host.as_ref().and_then(|host| host.browser()), callback.as_deref())
+          {
+            let browser_id = browser.identifier();
+            let id = remember(PendingRequest {
+              browser_id,
+              prompt_id: Some(prompt_id),
+              answer: PendingAnswer::Prompt(callback.clone()),
+            });
+            prompts(
+              browser_id,
+              crate::BrowserStatus::PermissionRequest {
+                id,
+                origin: requesting_origin.map(ToString::to_string).unwrap_or_default(),
+                kinds: kinds(requested_permissions, permission_kind),
+              },
+            );
+            return 1;
+          }
+
           // Chrome style displays the permission prompt UI.
           if !is_alloy_style(host.as_ref()) {
             return 0;
@@ -310,6 +490,28 @@ wrap_permission_handler! {
           callback.cont(PermissionRequestResult::ACCEPT);
           1
         }
+      }
+    }
+
+    fn on_dismiss_permission_prompt(
+      &self,
+      browser: Option<&mut Browser>,
+      prompt_id: u64,
+      _result: PermissionRequestResult,
+    ) {
+      let Some(browser_id) = browser.map(|browser| browser.identifier()) else {
+        return;
+      };
+      // Also reached after an answer, when nothing is pending any more.
+      let dismissed = with_pending(|pending| {
+        let id = pending
+          .iter()
+          .find(|(_, request)| request.browser_id == browser_id && request.prompt_id == Some(prompt_id))
+          .map(|(id, _)| *id)?;
+        pending.remove(&id).map(|_| id)
+      });
+      if let (Some(id), Some(prompts)) = (dismissed, &self.prompts) {
+        prompts(browser_id, crate::BrowserStatus::PermissionDismissed { id });
       }
     }
   }
