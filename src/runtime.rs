@@ -1829,7 +1829,11 @@ impl<T: UserEvent> WinitCefApp<T> {
               };
               let url = CefString::from(&frame.url()).to_string();
               if url.is_empty() || url == "about:blank" {
-                frame.load_url(Some(&CefString::from(initial_url.as_str())));
+                // A navigation already in flight will commit on its own.
+                // Loading again would cancel it and request the page twice.
+                if child.browser.is_loading() == 0 {
+                  frame.load_url(Some(&CefString::from(initial_url.as_str())));
+                }
                 true
               } else {
                 false

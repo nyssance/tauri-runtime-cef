@@ -428,6 +428,22 @@ pub trait WebviewBuilderCefExt {
     handler: F,
   ) -> Self;
 
+  /// Observe this webview's native chrome state. Popups it opens report
+  /// theirs through [`SurfacePopupEvent::Status`](crate::SurfacePopupEvent).
+  #[must_use]
+  fn on_browser_status<F: Fn(crate::BrowserStatus) + Send + Sync + 'static>(
+    self,
+    handler: F,
+  ) -> Self;
+
+  /// Claim chords before page content, for this webview and its popups.
+  /// Requires a status observer, which receives each claimed chord.
+  #[must_use]
+  fn browser_shortcuts<F: Fn(crate::KeyChord) -> bool + Send + Sync + 'static>(
+    self,
+    filter: F,
+  ) -> Self;
+
   /// Sets the browser runtime style.
   ///
   /// See [`RuntimeStyle`] for more information.
@@ -496,6 +512,26 @@ where
   ) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.surface_popup_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn on_browser_status<F: Fn(crate::BrowserStatus) + Send + Sync + 'static>(
+    mut self,
+    handler: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.browser_status_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn browser_shortcuts<F: Fn(crate::KeyChord) -> bool + Send + Sync + 'static>(
+    mut self,
+    filter: F,
+  ) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.shortcut_filter = Some(Arc::new(filter));
     });
     self
   }

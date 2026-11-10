@@ -46,6 +46,11 @@ pub enum SurfacePopupEvent {
     browser_id: i32,
     title: String,
   },
+  /// Native chrome state of the popup's own browser.
+  Status {
+    browser_id: i32,
+    status: crate::BrowserStatus,
+  },
 }
 pub type SurfacePopupHandler = dyn Fn(SurfacePopupEvent) + Send + Sync;
 
@@ -170,6 +175,20 @@ impl PopupFamily {
       && let Some(handler) = &self.surface_handler
     {
       handler(SurfacePopupEvent::Title { browser_id, title });
+    }
+  }
+
+  pub(crate) fn status(&self, state: &FrameNavigationState, status: crate::BrowserStatus) {
+    let id = self.popups.lock().ok().and_then(|popups| {
+      popups
+        .iter()
+        .find(|popup| popup.surface && popup.state.is_same_browser(state))
+        .map(|popup| popup.browser.identifier())
+    });
+    if let Some(browser_id) = id
+      && let Some(handler) = &self.surface_handler
+    {
+      handler(SurfacePopupEvent::Status { browser_id, status });
     }
   }
 

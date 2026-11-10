@@ -10,6 +10,7 @@ wrap_load_handler! {
   pub struct TauriCefLoadHandler {
     on_page_load_handler: Option<Arc<tauri_runtime::webview::OnPageLoadHandler>>,
     frame_event_handler: Option<Arc<crate::FrameEventHandler>>,
+    status: Option<Arc<crate::browser_status::ScopedStatus>>,
   }
 
   impl LoadHandler {
@@ -17,10 +18,20 @@ wrap_load_handler! {
       &self,
       browser: Option<&mut Browser>,
       is_loading: ::std::os::raw::c_int,
-      _can_go_back: ::std::os::raw::c_int,
-      _can_go_forward: ::std::os::raw::c_int,
+      can_go_back: ::std::os::raw::c_int,
+      can_go_forward: ::std::os::raw::c_int,
     ) {
       if let Some(browser) = browser {
+        if let Some(status) = &self.status {
+          status(
+            browser.identifier(),
+            crate::BrowserStatus::Loading {
+              is_loading: is_loading != 0,
+              can_go_back: can_go_back != 0,
+              can_go_forward: can_go_forward != 0,
+            },
+          );
+        }
         let mut frame = browser.main_frame();
         crate::frame::emit_frame_event(
           &self.frame_event_handler,
@@ -59,10 +70,24 @@ wrap_load_handler! {
       &self,
       browser: Option<&mut Browser>,
       frame: Option<&mut Frame>,
-      _error_code: Errorcode,
-      _error_text: Option<&CefString>,
+      error_code: Errorcode,
+      error_text: Option<&CefString>,
       failed_url: Option<&CefString>,
     ) {
+      let code = error_code.get_raw() as i32;
+      if let (Some(status), Some(browser), Some(frame)) = (&self.status, browser.as_deref(), frame.as_deref())
+        && frame.is_main() != 0
+        && code != crate::browser_status::ERR_ABORTED
+      {
+        status(
+          browser.identifier(),
+          crate::BrowserStatus::LoadFailed {
+            url: failed_url.map(ToString::to_string).unwrap_or_default(),
+            code,
+            description: error_text.map(ToString::to_string).unwrap_or_default(),
+          },
+        );
+      }
       if let Some(failed_url) = failed_url
         && let Ok(url) = url::Url::parse(&failed_url.to_string())
       {

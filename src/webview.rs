@@ -856,6 +856,14 @@ impl<T: UserEvent> WinitCefApp<T> {
       navigation_handler: pending.navigation_handler.map(Arc::from),
       new_window_handler: pending.new_window_handler.map(Arc::from),
       download_handler: pending.download_handler.take(),
+      browser_status_handler: pending
+        .runtime_specific_attributes
+        .browser_status_handler
+        .clone(),
+      shortcut_filter: pending
+        .runtime_specific_attributes
+        .shortcut_filter
+        .clone(),
       console_message_handler: pending
         .runtime_specific_attributes
         .console_message_handler
@@ -1596,6 +1604,12 @@ pub struct CefWebviewAttributes {
   pub browser_content: bool,
   /// Opt in to separate popup lifecycle and CDP notifications for surface guests.
   pub surface_popup_handler: Option<Arc<crate::SurfacePopupHandler>>,
+  /// Native chrome state of this webview's own browser: loading, progress,
+  /// session history bounds, icons and main-frame load failures.
+  pub browser_status_handler: Option<Arc<crate::BrowserStatusHandler>>,
+  /// Chords the embedder claims before page content. Shared with the popups
+  /// this webview opens; a claimed chord is reported as a browser status.
+  pub shortcut_filter: Option<Arc<crate::ShortcutFilter>>,
   /// The browser runtime style, see [`RuntimeStyle`]. CEF picks one when not set.
   pub runtime_style: Option<RuntimeStyle>,
   /// Observer of the native lifecycle events of every frame of the webview.

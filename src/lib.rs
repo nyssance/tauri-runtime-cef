@@ -5,6 +5,8 @@
 #![allow(clippy::arc_with_non_send_sync)]
 #![allow(clippy::too_many_arguments)]
 
+mod browser_status;
+pub use browser_status::{BrowserStatus, BrowserStatusHandler, KeyChord, ShortcutFilter};
 mod cef_impl;
 mod devtools;
 mod dialog;

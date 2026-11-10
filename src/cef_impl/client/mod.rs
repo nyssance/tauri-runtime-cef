@@ -52,6 +52,8 @@ pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
     Option<Arc<tauri_runtime::webview::NewWindowHandler<T, CefRuntime<T>>>>,
   pub(crate) download_handler: Option<Arc<tauri_runtime::webview::DownloadHandler>>,
   pub(crate) console_message_handler: Option<Arc<crate::ConsoleMessageHandler>>,
+  pub(crate) browser_status_handler: Option<Arc<crate::BrowserStatusHandler>>,
+  pub(crate) shortcut_filter: Option<Arc<crate::ShortcutFilter>>,
   pub(crate) permission_request_handler: Option<Arc<PermissionRequestHandler>>,
   pub(crate) web_content_process_terminate_handler:
     Option<Arc<tauri_runtime::webview::OnWebContentProcessTerminateHandler>>,
@@ -68,9 +70,24 @@ impl<T: UserEvent> Clone for TauriCefBrowserClientHandlers<T> {
       new_window_handler: self.new_window_handler.clone(),
       download_handler: self.download_handler.clone(),
       console_message_handler: self.console_message_handler.clone(),
+      browser_status_handler: self.browser_status_handler.clone(),
+      shortcut_filter: self.shortcut_filter.clone(),
       permission_request_handler: self.permission_request_handler.clone(),
       web_content_process_terminate_handler: self.web_content_process_terminate_handler.clone(),
     }
+  }
+}
+
+impl<T: UserEvent> TauriCefBrowserClient<T> {
+  /// Chrome state of exactly this client's own native browser.
+  fn scoped_status(&self) -> Option<Arc<crate::browser_status::ScopedStatus>> {
+    let handler = self.handlers.browser_status_handler.clone()?;
+    let state = self.frame_navigation_state.clone();
+    Some(Arc::new(move |browser_id, status| {
+      if state.has_browser_id(browser_id) {
+        handler(status);
+      }
+    }))
   }
 }
 
@@ -149,11 +166,14 @@ wrap_with_args! {
       let new_window_handler = self.handlers.new_window_handler.clone();
       let download_handler = self.handlers.download_handler.clone();
       let permission_request_handler = self.handlers.permission_request_handler.clone();
+      let shortcut_filter = self.handlers.shortcut_filter.clone();
       let family = self.popup_family.clone();
       let create_popup: Arc<life_span::PopupClientFactory> = Arc::new(move |opener, state| {
         let events = state.clone();
         let title_state = state.clone();
         let title_family = family.clone();
+        let status_state = state.clone();
+        let status_family = family.clone();
         TauriCefBrowserClient::build(TauriCefBrowserClientArgs {
           context: context.clone(),
           window_id,
@@ -205,6 +225,14 @@ wrap_with_args! {
             // SSO or OAuth window's URLs to an observer registered for the app's
             // own content.
             console_message_handler: None,
+            // A popup reports its own chrome state through the family's
+            // separately identified surface channel, never the opener's.
+            browser_status_handler: Some(Arc::new(move |status| {
+              if let Some(family) = status_family.upgrade() {
+                family.status(&status_state, status);
+              }
+            })),
+            shortcut_filter: shortcut_filter.clone(),
             ipc_handler: None,
             on_page_load_handler: None,
             document_title_changed_handler: Some(Arc::new(move |title| { if let Some(family) = title_family.upgrade() { family.title(&title_state, title); } })),
@@ -232,6 +260,7 @@ wrap_with_args! {
       Some(TauriCefLoadHandler::new(
         self.handlers.on_page_load_handler.clone(),
         self.handlers.frame_event_handler.clone(),
+        self.scoped_status(),
       ))
     }
 
@@ -244,6 +273,7 @@ wrap_with_args! {
         console_message_handler: self.handlers.console_message_handler.clone(),
         cursor_handler: self.cursor_handler.clone(),
         frame_navigation_state: self.frame_navigation_state.clone(),
+        status: self.scoped_status(),
       }))
     }
 
@@ -260,7 +290,11 @@ wrap_with_args! {
     }
 
     fn keyboard_handler(&self) -> Option<KeyboardHandler> {
-      Some(TauriCefKeyboardHandler::new(self.devtools_enabled))
+      Some(TauriCefKeyboardHandler::new(
+        self.devtools_enabled,
+        self.handlers.shortcut_filter.clone(),
+        self.scoped_status(),
+      ))
     }
 
     fn command_handler(&self) -> Option<CommandHandler> {

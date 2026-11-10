@@ -27,6 +27,7 @@ wrap_with_args! {
     console_message_handler: Option<Arc<crate::ConsoleMessageHandler>>,
     frame_navigation_state: crate::FrameNavigationState,
     cursor_handler: Option<Arc<crate::CursorHandler>>,
+    status: Option<Arc<crate::browser_status::ScopedStatus>>,
   }
 
   impl DisplayHandler {
@@ -46,6 +47,25 @@ wrap_with_args! {
         return 1;
       }
       0
+    }
+
+    fn on_loading_progress_change(&self, browser: Option<&mut Browser>, progress: f64) {
+      if let (Some(status), Some(browser)) = (&self.status, browser) {
+        status(browser.identifier(), crate::BrowserStatus::Progress(progress.clamp(0.0, 1.0)));
+      }
+    }
+
+    fn on_favicon_urlchange(
+      &self,
+      browser: Option<&mut Browser>,
+      icon_urls: Option<&mut CefStringList>,
+    ) {
+      if let (Some(status), Some(browser)) = (&self.status, browser) {
+        let urls = icon_urls
+          .map(|urls| std::mem::take(urls).into_iter().collect())
+          .unwrap_or_default();
+        status(browser.identifier(), crate::BrowserStatus::Favicon(urls));
+      }
     }
 
     fn on_title_change(
