@@ -106,7 +106,7 @@ wrap_with_args! {
     fn on_after_created(&self, browser: Option<&mut Browser>) {
       if let (Some(browser), Some(opener)) = (browser.as_deref(), self.opener.as_ref()) {
         if let Some(family) = self.popup_family.upgrade() {
-          let _ = self.sender.send(Message::PopupCreated(opener.clone(), browser.identifier(), family.clone()));
+          let _ = self.sender.send(Message::PopupCreated(opener.clone(), browser.identifier(), self.window_id, family.clone()));
           self.context.wake_event_loop();
           family.created(browser, opener, &self.frame_navigation_state);
         } else if let Some(host) = browser.host() {

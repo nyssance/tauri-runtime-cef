@@ -5,6 +5,11 @@
 //! CEF-owned popup lifetimes preserve the original browser and opener.
 //! Surface popups have an explicit, separately identified observation channel;
 //! ordinary popup contents never flow to the opener's protocol handlers.
+//!
+//! A surface popup is an independent browser tab: closing its opener leaves it
+//! open, addressable through its own [`SurfacePopup`] handle. Ordinary popups
+//! keep following their opener. Window close and application shutdown own every
+//! member of a family, whether or not its root is still alive.
 
 use crate::{
   FrameNavigationState, NativeWindowToken,
@@ -12,7 +17,7 @@ use crate::{
 };
 use cef::*;
 use std::sync::{
-  Arc, Mutex,
+  Arc, Mutex, Weak,
   atomic::{AtomicBool, Ordering},
 };
 use tauri_runtime::dpi::{LogicalPosition, LogicalSize, Rect};
@@ -27,6 +32,8 @@ pub enum SurfacePopupEvent {
     opener_id: i32,
     token: String,
     url: String,
+    /// Addresses this popup for its whole lifetime, independently of its opener.
+    popup: SurfacePopup,
   },
   Protocol {
     browser_id: i32,
@@ -41,6 +48,65 @@ pub enum SurfacePopupEvent {
   },
 }
 pub type SurfacePopupHandler = dyn Fn(SurfacePopupEvent) + Send + Sync;
+
+/// Runs a task on the UI thread. Returns `false` once the event loop is gone.
+pub(crate) type PopupDispatch = dyn Fn(Box<dyn FnOnce() + Send>) -> bool + Send + Sync;
+
+/// The surface popup no longer exists, or the event loop has shut down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfacePopupClosed;
+
+impl std::fmt::Display for SurfacePopupClosed {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("surface popup closed")
+  }
+}
+impl std::error::Error for SurfacePopupClosed {}
+
+/// Handle to one embedded popup browser. It stays usable after the opener and
+/// the family root have closed; it never keeps the browser itself alive.
+#[derive(Clone)]
+pub struct SurfacePopup {
+  browser_id: i32,
+  family: Weak<PopupFamily>,
+  dispatch: Arc<PopupDispatch>,
+}
+
+impl std::fmt::Debug for SurfacePopup {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("SurfacePopup")
+      .field("browser_id", &self.browser_id)
+      .finish_non_exhaustive()
+  }
+}
+
+impl SurfacePopup {
+  /// Native browser identity, as reported by every [`SurfacePopupEvent`].
+  pub fn browser_id(&self) -> i32 {
+    self.browser_id
+  }
+
+  /// Observe the popup on the UI thread. The callback receives `None` when the
+  /// popup closed before the callback ran. An error means it will never run.
+  pub fn with_webview<F: FnOnce(Option<&Webview>) + Send + 'static>(
+    &self,
+    callback: F,
+  ) -> Result<(), SurfacePopupClosed> {
+    let family = self.family.clone();
+    let browser_id = self.browser_id;
+    if (self.dispatch)(Box::new(move || {
+      let popup = family
+        .upgrade()
+        .and_then(|family| family.observe_popup(browser_id));
+      callback(popup.as_ref());
+    })) {
+      Ok(())
+    } else {
+      Err(SurfacePopupClosed)
+    }
+  }
+}
 
 const MAX_POPUPS: usize = 128;
 
@@ -68,6 +134,7 @@ struct Popup {
 
 pub(crate) struct PopupFamily {
   surface_handler: Option<Arc<SurfacePopupHandler>>,
+  dispatch: Option<Arc<PopupDispatch>>,
   root: FrameNavigationState,
   closing: AtomicBool,
   popups: Mutex<Vec<Arc<Popup>>>,
@@ -79,9 +146,11 @@ impl PopupFamily {
   pub(crate) fn new(
     root: FrameNavigationState,
     surface_handler: Option<Arc<SurfacePopupHandler>>,
+    dispatch: Option<Arc<PopupDispatch>>,
   ) -> Self {
     Self {
       surface_handler,
+      dispatch,
       root,
       closing: AtomicBool::new(false),
       popups: Mutex::default(),
@@ -105,7 +174,12 @@ impl PopupFamily {
   }
 
   pub(crate) fn admits(&self, opener: &FrameNavigationState, browser_id: i32) -> bool {
-    if self.closing.load(Ordering::Acquire) || !opener.has_browser_id(browser_id) {
+    // A closed opener keeps its identity, and a detaching family stays live
+    // after its root, so the opener's own lifetime is checked explicitly.
+    if self.closing.load(Ordering::Acquire)
+      || opener.is_closed()
+      || !opener.has_browser_id(browser_id)
+    {
       return false;
     }
     let Ok(popups) = self.popups.lock() else {
@@ -152,8 +226,25 @@ impl PopupFamily {
     Some(pending.remove(index))
   }
 
+  /// Surface popups of an observed family outlive their opener.
+  fn detaches(&self, popup: &Popup) -> bool {
+    popup.surface && self.surface_handler.is_some() && self.dispatch.is_some()
+  }
+
+  /// Whether a reservation can still resolve into a popup.
+  pub(crate) fn holds(&self, request: &PopupRequest) -> bool {
+    !self.closing.load(Ordering::Acquire) && !request.opener.is_closed()
+  }
+
+  fn observe_popup(&self, browser_id: i32) -> Option<Webview> {
+    self
+      .observe()
+      .into_iter()
+      .find(|popup| popup.snapshot().browser_id == browser_id)
+  }
+
   pub(crate) fn created(
-    &self,
+    self: &Arc<Self>,
     browser: &Browser,
     request: &PopupRequest,
     state: &FrameNavigationState,
@@ -211,7 +302,10 @@ impl PopupFamily {
     if let Ok(mut popups) = self.popups.lock() {
       popups.push(popup);
       drop(popups);
-      if surface && let Some(handler) = &self.surface_handler {
+      if surface
+        && let Some(handler) = &self.surface_handler
+        && let Some(dispatch) = &self.dispatch
+      {
         let url = browser
           .main_frame()
           .map(|frame| CefString::from(&frame.url()).to_string())
@@ -221,6 +315,11 @@ impl PopupFamily {
           opener_id: host.opener_identifier(),
           token,
           url,
+          popup: SurfacePopup {
+            browser_id,
+            family: Arc::downgrade(self),
+            dispatch: dispatch.clone(),
+          },
         });
       }
     } else {
@@ -229,8 +328,9 @@ impl PopupFamily {
     }
   }
 
-  /// Revoke descendants before asking CEF to close them. The native close
-  /// callbacks remove their browser references; no family lock crosses CEF.
+  /// Revoke dependent descendants before asking CEF to close them. The native
+  /// close callbacks remove their browser references; no family lock crosses CEF.
+  /// Detached surface popups survive, together with everything they opened.
   pub(crate) fn closed(&self, state: &FrameNavigationState, browser_id: i32) {
     if !state.has_browser_id(browser_id) {
       return;
@@ -249,7 +349,11 @@ impl PopupFamily {
     }
     state.close();
     let root_closed = self.root.is_same_browser(state);
-    if root_closed {
+    // A family that detaches its surface popups stays live after its root:
+    // survivors keep opening popups and remain observable. Teardown still
+    // revokes it through `close_all`.
+    let family_closed = root_closed && self.dispatch.is_none();
+    if family_closed {
       self.closing.store(true, Ordering::Release);
     }
     let descendants = {
@@ -259,11 +363,16 @@ impl PopupFamily {
       popups.retain(|popup| !popup.state.is_same_browser(state));
       revoke_descendants(
         state,
-        root_closed,
-        popups
-          .iter()
-          .enumerate()
-          .map(|(index, popup)| (index, &popup.state, &popup.opener, &popup.closing)),
+        family_closed,
+        popups.iter().enumerate().map(|(index, popup)| {
+          (
+            index,
+            &popup.state,
+            &popup.opener,
+            &popup.closing,
+            self.detaches(popup),
+          )
+        }),
       )
       .into_iter()
       .map(|index| Arc::clone(&popups[index]))
@@ -296,7 +405,7 @@ impl PopupFamily {
         popups
           .iter()
           .enumerate()
-          .map(|(index, popup)| (index, &popup.state, &popup.opener, &popup.closing)),
+          .map(|(index, popup)| (index, &popup.state, &popup.opener, &popup.closing, false)),
       )
       .into_iter()
       .map(|index| Arc::clone(&popups[index]))
@@ -311,10 +420,11 @@ impl PopupFamily {
     }
   }
 
-  /// A revoked family lost its root and admits no further popup, so nothing it
-  /// still has reserved can ever be created. CEF does not always report the
-  /// abort of a popup it discards, so the reservations of a revoked family are
-  /// what the event loop would otherwise wait on forever.
+  /// A revoked family admits no further popup, so nothing it still has
+  /// reserved can ever be created. CEF does not always report the abort of a
+  /// popup it discards, so the reservations of a revoked family are what the
+  /// event loop would otherwise wait on forever.
+  #[cfg(test)]
   pub(crate) fn is_revoked(&self) -> bool {
     self.closing.load(Ordering::Acquire)
   }
@@ -406,17 +516,19 @@ impl PopupFamily {
   }
 }
 
-/// The graph walk is independent of CEF calls. Revoke every descendant before
-/// returning handles for native close, including when callbacks arrive out of order.
+/// The graph walk is independent of CEF calls. Revoke every dependent descendant
+/// before returning handles for native close, including when callbacks arrive
+/// out of order. A detached node is revoked only when the whole family is.
 fn revoke_descendants<'a>(
   state: &FrameNavigationState,
-  root_closed: bool,
+  family_closed: bool,
   nodes: impl Iterator<
     Item = (
       usize,
       &'a FrameNavigationState,
       &'a FrameNavigationState,
       &'a AtomicBool,
+      bool,
     ),
   > + Clone,
 ) -> Vec<usize> {
@@ -424,9 +536,10 @@ fn revoke_descendants<'a>(
   let mut indices = Vec::new();
   loop {
     let before = indices.len();
-    for (index, state, opener, closing) in nodes.clone() {
+    for (index, state, opener, closing, detached) in nodes.clone() {
       if !closing.load(Ordering::Acquire)
-        && (root_closed || revoked.iter().any(|parent| parent.is_same_browser(opener)))
+        && (family_closed
+          || (!detached && revoked.iter().any(|parent| parent.is_same_browser(opener))))
       {
         closing.store(true, Ordering::Release);
         state.close();
@@ -469,7 +582,7 @@ mod tests {
       nodes
         .iter()
         .enumerate()
-        .map(|(index, (state, opener, closing))| (index, state, opener, closing))
+        .map(|(index, (state, opener, closing))| (index, state, opener, closing, false))
     };
     assert!(revoke_descendants(&created(2), false, refs()).is_empty());
     assert_eq!(revoke_descendants(&first, false, refs()), vec![0]);
@@ -480,9 +593,112 @@ mod tests {
     assert!(revoke_descendants(&root, true, refs()).is_empty());
   }
   #[test]
+  fn detached_popups_survive_their_opener_but_not_family_teardown() {
+    let root = created(1);
+    let tab = created(2);
+    let nested_tab = created(3);
+    let dependent = created(4);
+    let nested_dependent = created(5);
+    let nodes = [
+      (tab.clone(), root.clone(), AtomicBool::new(false), true),
+      (
+        nested_tab.clone(),
+        tab.clone(),
+        AtomicBool::new(false),
+        true,
+      ),
+      (
+        dependent.clone(),
+        root.clone(),
+        AtomicBool::new(false),
+        false,
+      ),
+      // An ordinary popup still follows the detached tab that opened it.
+      (
+        nested_dependent.clone(),
+        tab.clone(),
+        AtomicBool::new(false),
+        false,
+      ),
+    ];
+    let refs = || {
+      nodes
+        .iter()
+        .enumerate()
+        .map(|(index, (state, opener, closing, detached))| {
+          (index, state, opener, closing, *detached)
+        })
+    };
+    // The opener closes: only its ordinary popup goes with it.
+    assert_eq!(revoke_descendants(&root, false, refs()), vec![2]);
+    assert!(!tab.is_closed() && !nested_tab.is_closed());
+    // An intermediate tab closes: its nested tab survives.
+    assert_eq!(revoke_descendants(&tab, false, refs()), vec![3]);
+    assert!(!nested_tab.is_closed());
+    // Window close and shutdown take every survivor.
+    assert_eq!(revoke_descendants(&root, true, refs()), vec![0, 1]);
+    assert!(nodes.iter().all(|node| node.2.load(Ordering::Acquire)));
+  }
+  #[test]
+  fn a_detaching_family_outlives_its_root_until_teardown() {
+    let root = created(1);
+    let dispatch: Arc<PopupDispatch> = Arc::new(|task| {
+      task();
+      true
+    });
+    let family = Arc::new(PopupFamily::new(
+      root.clone(),
+      Some(Arc::new(|_| {})),
+      Some(dispatch),
+    ));
+    let from_root = family.reserve(&root, 1, 7).unwrap();
+    family.closed(&root, 1);
+    assert!(!family.is_revoked());
+    // The root can no longer open anything, so its reservation is dead and
+    // must not keep the event loop waiting.
+    assert!(!family.holds(&from_root));
+    assert!(!family.admits(&root, 1));
+    family.close_all();
+    assert!(family.is_revoked());
+  }
+  #[test]
+  fn a_handle_to_a_closed_popup_reports_absence_instead_of_another_browser() {
+    let dispatch: Arc<PopupDispatch> = Arc::new(|task| {
+      task();
+      true
+    });
+    let family = Arc::new(PopupFamily::new(
+      created(1),
+      Some(Arc::new(|_| {})),
+      Some(dispatch.clone()),
+    ));
+    let popup = SurfacePopup {
+      browser_id: 2,
+      family: Arc::downgrade(&family),
+      dispatch,
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let observed = sender.clone();
+    popup
+      .with_webview(move |native| observed.send(native.is_some()).unwrap())
+      .unwrap();
+    assert_eq!(receiver.try_recv(), Ok(false));
+    drop(family);
+    popup
+      .with_webview(move |native| sender.send(native.is_some()).unwrap())
+      .unwrap();
+    assert_eq!(receiver.try_recv(), Ok(false));
+    let stopped = SurfacePopup {
+      browser_id: 2,
+      family: Weak::new(),
+      dispatch: Arc::new(|_| false),
+    };
+    assert_eq!(stopped.with_webview(|_| {}), Err(SurfacePopupClosed));
+  }
+  #[test]
   fn pending_popups_are_bounded_and_retained_until_exact_creation_or_abort() {
     let root = created(1);
-    let family = PopupFamily::new(root.clone(), None);
+    let family = PopupFamily::new(root.clone(), None, None);
     let first = family.reserve(&root, 1, 7).unwrap();
     assert!(family.reserve(&root, 1, 7).is_none());
     assert!(family.abort(&created(1), 7).is_none());
@@ -499,7 +715,7 @@ mod tests {
   #[test]
   fn teardown_revokes_a_family_still_holding_an_unresolved_reservation() {
     let root = created(1);
-    let family = PopupFamily::new(root.clone(), None);
+    let family = PopupFamily::new(root.clone(), None, None);
     // CEF discarded this popup without ever creating or aborting it.
     let request = family.reserve(&root, 1, 7).unwrap();
     assert!(!family.is_revoked());
@@ -517,7 +733,7 @@ mod tests {
   #[test]
   fn popup_admission_requires_the_live_exact_native_opener() {
     let root = created(1);
-    let family = PopupFamily::new(root.clone(), None);
+    let family = PopupFamily::new(root.clone(), None, None);
     assert!(family.admits(&root, 1));
     assert!(!family.admits(&root, 2));
     assert!(!family.admits(&created(1), 1));
@@ -533,7 +749,7 @@ mod tests {
     // A root that never observed a native frame event has no browser identity.
     let root = FrameNavigationState::new();
     assert!(!root.has_browser_id(1));
-    let family = PopupFamily::new(root.clone(), None);
+    let family = PopupFamily::new(root.clone(), None, None);
     // The per-browser native callback cannot match an unobserved identity.
     family.closed(&root, 1);
     assert!(!family.closing.load(Ordering::Acquire));

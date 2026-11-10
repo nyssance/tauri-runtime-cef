@@ -810,12 +810,21 @@ impl<T: UserEvent> WinitCefApp<T> {
       .take()
       .map(Arc::from);
     let frame_navigation_state = crate::FrameNavigationState::new();
+    let surface_popup_handler = pending
+      .runtime_specific_attributes
+      .surface_popup_handler
+      .clone();
+    // Surface popups are addressed through the event loop itself, so their
+    // handles keep working after this webview and its browser are gone.
+    let popup_dispatch = surface_popup_handler.as_ref().map(|_| {
+      let context = context.clone();
+      Arc::new(move |task: Box<dyn FnOnce() + Send>| context.run_on_main_thread(task).is_ok())
+        as Arc<crate::popup::PopupDispatch>
+    });
     let popup_family = Arc::new(crate::popup::PopupFamily::new(
       frame_navigation_state.clone(),
-      pending
-        .runtime_specific_attributes
-        .surface_popup_handler
-        .clone(),
+      surface_popup_handler,
+      popup_dispatch,
     ));
     let dialogs = crate::dialog::DialogState::new(frame_navigation_state.clone());
     let frame_state_for_events = frame_navigation_state.clone();

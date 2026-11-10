@@ -81,6 +81,11 @@ impl FrameNavigationState {
     }
   }
 
+  /// A closed native browser lifetime never becomes live again.
+  pub(crate) fn is_closed(&self) -> bool {
+    self.state.lock().map_or(true, |state| state.exhausted)
+  }
+
   pub(crate) fn observe_document(&self, browser: &cef::Browser) -> Option<NativeDocumentToken> {
     use cef::{ImplBrowser, ImplFrame};
     let generation = self.ready_generation()?;

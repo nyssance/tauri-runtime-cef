@@ -1516,6 +1516,7 @@ pub(crate) enum Message<T: UserEvent> {
   PopupCreated(
     crate::popup::PopupRequest,
     i32,
+    WindowId,
     Arc<crate::popup::PopupFamily>,
   ),
   PopupAborted(crate::popup::PopupRequest),
@@ -1744,7 +1745,7 @@ pub(crate) struct AppState<T: UserEvent> {
   pub(crate) winid_id_to_window_id_map: HashMap<WinitWindowId, WindowId>,
   pub(crate) callback: Box<dyn FnMut(RunEvent<T>)>,
   pub(crate) live_browsers: usize,
-  live_popups: HashMap<i32, Arc<crate::popup::PopupFamily>>,
+  live_popups: HashMap<i32, (WindowId, Arc<crate::popup::PopupFamily>)>,
   pending_popups: Vec<(crate::popup::PopupRequest, Arc<crate::popup::PopupFamily>)>,
   pub(crate) exiting: bool,
 }
@@ -1810,34 +1811,42 @@ impl<T: UserEvent> WinitCefApp<T> {
 
   fn handle_message(&mut self, event_loop: &dyn ActiveEventLoop, message: Message<T>) {
     match message {
-      Message::CheckInitialNavigation { webview_id, initial_url, reply } => {
-        let retry = !self.state.exiting && self.state.windows.values()
-          .flat_map(|window| window.children.iter())
-          .find(|child| child.webview_id == webview_id)
-          .is_some_and(|child| {
-            let Some(frame) = child.browser.main_frame() else {
-              return true;
-            };
-            let url = CefString::from(&frame.url()).to_string();
-            if url.is_empty() || url == "about:blank" {
-              frame.load_url(Some(&CefString::from(initial_url.as_str())));
-              true
-            } else {
-              false
-            }
-          });
+      Message::CheckInitialNavigation {
+        webview_id,
+        initial_url,
+        reply,
+      } => {
+        let retry = !self.state.exiting
+          && self
+            .state
+            .windows
+            .values()
+            .flat_map(|window| window.children.iter())
+            .find(|child| child.webview_id == webview_id)
+            .is_some_and(|child| {
+              let Some(frame) = child.browser.main_frame() else {
+                return true;
+              };
+              let url = CefString::from(&frame.url()).to_string();
+              if url.is_empty() || url == "about:blank" {
+                frame.load_url(Some(&CefString::from(initial_url.as_str())));
+                true
+              } else {
+                false
+              }
+            });
         let _ = reply.send(retry);
       }
       Message::EventLoop(message) => self.handle_event_loop_message(event_loop, message),
       Message::PopupPending(request, family) => {
         self.state.pending_popups.push((request, family));
       }
-      Message::PopupCreated(request, id, family) => {
+      Message::PopupCreated(request, id, window_id, family) => {
         self
           .state
           .pending_popups
           .retain(|(pending, _)| !pending.is_same(&request));
-        self.state.live_popups.insert(id, family);
+        self.state.live_popups.insert(id, (window_id, family));
       }
       Message::PopupAborted(request) => {
         self
@@ -2189,6 +2198,13 @@ impl<T: UserEvent> WinitCefApp<T> {
     // The window is gone from state, so BrowserClosed will not find these
     // children later. Clean registry entries while we still hold them; the CEF
     // shutdown drain is still enforced by live_browsers.
+    // A detached surface popup outlives the webview that opened it, so its
+    // family may no longer be reachable from this window's children.
+    for (owner, family) in self.state.live_popups.values() {
+      if *owner == window_id {
+        family.close_all();
+      }
+    }
     for child in &appwindow.children {
       self.remove_scheme_handler_entries(child);
       child.popup_family.close_all();
@@ -2275,6 +2291,11 @@ impl<T: UserEvent> WinitCefApp<T> {
         child.host.close_browser(1);
       }
     }
+    // Detached surface popups outlive the webview that opened them, so their
+    // family is no longer reachable from any window. Shutdown still owns them.
+    for (_, family) in self.state.live_popups.values() {
+      family.close_all();
+    }
   }
 
   #[cfg(target_os = "macos")]
@@ -2295,15 +2316,14 @@ impl<T: UserEvent> WinitCefApp<T> {
     // A reservation is normally resolved by `PopupCreated` or `PopupAborted`,
     // but CEF discards popups without always reporting the abort — the opener
     // can be torn down first, or the abort can arrive for a browser its opener
-    // no longer matches. Teardown (window close, app shutdown, the root's own
-    // native close) revokes the family, and a revoked family never admits a
-    // popup again, so its reservations are dead and must not hold the process
-    // open. Reservations of live families still gate the exit until CEF
+    // no longer matches. A reservation whose opener has closed, or whose family
+    // was revoked by teardown, can never be created and must not hold the
+    // process open. Reservations of live openers still gate the exit until CEF
     // resolves them.
     self
       .state
       .pending_popups
-      .retain(|(_, family)| !family.is_revoked());
+      .retain(|(request, family)| family.holds(request));
 
     if self.state.live_browsers != 0
       || !self.state.live_popups.is_empty()

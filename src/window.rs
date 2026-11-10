@@ -1001,7 +1001,9 @@ impl<T: UserEvent> WinitCefApp<T> {
     let window = &appwindow.window;
 
     match message {
-      WindowMessage::Close | WindowMessage::Destroy => unreachable!("handled before borrowing"),
+      WindowMessage::Close | WindowMessage::Destroy => {
+        unreachable!("handled before borrowing")
+      }
       WindowMessage::ScaleFactor(tx) => _ = tx.send(Ok(window.scale_factor())),
       WindowMessage::InnerSize(tx) => _ = tx.send(Ok(window.surface_size())),
       WindowMessage::OuterSize(tx) => _ = tx.send(Ok(window.outer_size())),
