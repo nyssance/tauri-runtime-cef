@@ -26,6 +26,8 @@ pub enum BrowserStatus {
     can_go_back: bool,
     can_go_forward: bool,
   },
+  /// The main frame's address changed, including same-document navigation.
+  Address(String),
   /// Overall load progress in `0.0..=1.0`.
   Progress(f64),
   /// Candidate icon URLs of the current document, in page order.

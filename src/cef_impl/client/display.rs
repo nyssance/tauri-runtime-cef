@@ -98,6 +98,12 @@ wrap_with_args! {
         return;
       }
 
+      if let (Some(status), Some(browser), Some(frame)) = (&self.status, browser.as_deref(), frame.as_deref())
+        && frame.is_main() != 0
+      {
+        status(browser.identifier(), crate::BrowserStatus::Address(url.clone()));
+      }
+
       if let Ok(url) = url::Url::parse(&url) {
         crate::frame::emit_frame_event(
           &self.frame_event_handler,
