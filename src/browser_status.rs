@@ -58,6 +58,30 @@ pub enum BrowserStatus {
   },
   /// A pending request ended without an answer, e.g. the page navigated away.
   PermissionDismissed { id: u64 },
+  /// Progress of one download this browser started. Reported until it ends.
+  Download(DownloadProgress),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadProgress {
+  /// Identifies the download for [`cancel_download`](crate::cancel_download).
+  pub id: u32,
+  pub url: String,
+  /// Where the file is being written; empty until a destination is chosen.
+  pub path: String,
+  pub received_bytes: i64,
+  /// Zero or negative when the server did not announce a size.
+  pub total_bytes: i64,
+  pub state: DownloadState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadState {
+  InProgress,
+  Complete,
+  Canceled,
+  /// Stopped by a network or file error.
+  Interrupted,
 }
 
 /// Whether, and when, the embedder takes a chord.

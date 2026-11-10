@@ -7,8 +7,10 @@
 
 mod browser_status;
 pub use browser_status::{
-  BrowserStatus, BrowserStatusHandler, KeyChord, ShortcutClaim, ShortcutFilter,
+  BrowserStatus, BrowserStatusHandler, DownloadProgress, DownloadState, KeyChord, ShortcutClaim,
+  ShortcutFilter,
 };
+pub use cef_impl::client::cancel_download;
 pub use cef_impl::client::{PermissionAnswer, answer_permission_request};
 mod cef_impl;
 mod devtools;

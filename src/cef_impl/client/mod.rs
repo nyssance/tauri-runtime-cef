@@ -29,6 +29,7 @@ mod process;
 use command::{TauriCefCommandHandler, TauriCefCommandHandlerArgs};
 use context_menu::TauriCefContextMenuHandler;
 use display::{TauriCefDisplayHandler, TauriCefDisplayHandlerArgs};
+pub use download::cancel_download;
 use download::TauriCefDownloadHandler;
 use drag::TauriCefDragHandler;
 pub(crate) use drag::{
@@ -284,11 +285,12 @@ wrap_with_args! {
     }
 
     fn download_handler(&self) -> Option<DownloadHandler> {
+      let status = self.scoped_status();
       self
         .handlers
         .download_handler
         .clone()
-        .map(TauriCefDownloadHandler::new)
+        .map(|handler| TauriCefDownloadHandler::new(handler, status))
     }
 
     fn context_menu_handler(&self) -> Option<ContextMenuHandler> {

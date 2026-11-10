@@ -6,9 +6,35 @@ use std::sync::Arc;
 
 use cef::*;
 
+/// Controls of the downloads still in progress. Confined to CEF's UI thread:
+/// updates arrive there and [`cancel_download`] requires it.
+struct Controls(std::collections::HashMap<u32, DownloadItemCallback>);
+// SAFETY: confined to the UI thread, as documented above.
+unsafe impl Send for Controls {}
+static CONTROLS: std::sync::Mutex<Option<Controls>> = std::sync::Mutex::new(None);
+
+fn with_controls<T>(
+  action: impl FnOnce(&mut std::collections::HashMap<u32, DownloadItemCallback>) -> T,
+) -> T {
+  let mut controls = CONTROLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+  action(&mut controls.get_or_insert_with(|| Controls(Default::default())).0)
+}
+
+/// Cancel a download reported through
+/// [`BrowserStatus::Download`](crate::BrowserStatus). Must be called on the UI
+/// thread. Returns `false` when the download already ended.
+pub fn cancel_download(id: u32) -> bool {
+  let Some(control) = with_controls(|controls| controls.get(&id).cloned()) else {
+    return false;
+  };
+  control.cancel();
+  true
+}
+
 wrap_download_handler! {
   pub struct TauriCefDownloadHandler {
     download_handler: Arc<tauri_runtime::webview::DownloadHandler>,
+    status: Option<Arc<crate::browser_status::ScopedStatus>>,
   }
 
   impl DownloadHandler {
@@ -70,13 +96,46 @@ wrap_download_handler! {
 
     fn on_download_updated(
       &self,
-      _browser: Option<&mut Browser>,
+      browser: Option<&mut Browser>,
       download_item: Option<&mut DownloadItem>,
-      _callback: Option<&mut DownloadItemCallback>,
+      callback: Option<&mut DownloadItemCallback>,
     ) {
       let Some(download_item) = download_item else {
         return;
       };
+
+      let id = download_item.id();
+      let state = if download_item.is_complete() != 0 {
+        crate::DownloadState::Complete
+      } else if download_item.is_canceled() != 0 {
+        crate::DownloadState::Canceled
+      } else if download_item.is_interrupted() != 0 {
+        crate::DownloadState::Interrupted
+      } else {
+        crate::DownloadState::InProgress
+      };
+      with_controls(|controls| match (state, callback.as_deref()) {
+        (crate::DownloadState::InProgress, Some(callback)) => {
+          controls.insert(id, callback.clone());
+        }
+        (crate::DownloadState::InProgress, None) => {}
+        _ => {
+          controls.remove(&id);
+        }
+      });
+      if let (Some(status), Some(browser)) = (&self.status, browser.as_deref()) {
+        status(
+          browser.identifier(),
+          crate::BrowserStatus::Download(crate::DownloadProgress {
+            id,
+            url: CefString::from(&download_item.url()).to_string(),
+            path: CefString::from(&download_item.full_path()).to_string(),
+            received_bytes: download_item.received_bytes(),
+            total_bytes: download_item.total_bytes(),
+            state,
+          }),
+        );
+      }
 
       // Get download URL.
       let url_str = CefString::from(&download_item.url()).to_string();
