@@ -226,7 +226,9 @@ fn with_pending<T>(action: impl FnOnce(&mut std::collections::HashMap<u64, Pendi
 
 fn remember(request: PendingRequest) -> u64 {
   let id = NEXT_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-  with_pending(|pending| pending.insert(id, request));
+  // Nothing CEF-owned is released while the registry is locked.
+  let replaced = with_pending(|pending| pending.insert(id, request));
+  drop(replaced);
   id
 }
 
@@ -503,12 +505,18 @@ wrap_permission_handler! {
         return;
       };
       // Also reached after an answer, when nothing is pending any more.
+      // The removed request leaves the lock with its callback, which is
+      // released only afterwards.
       let dismissed = with_pending(|pending| {
         let id = pending
           .iter()
           .find(|(_, request)| request.browser_id == browser_id && request.prompt_id == Some(prompt_id))
           .map(|(id, _)| *id)?;
-        pending.remove(&id).map(|_| id)
+        pending.remove(&id).map(|request| (id, request))
+      });
+      let dismissed = dismissed.map(|(id, request)| {
+        drop(request);
+        id
       });
       if let (Some(id), Some(prompts)) = (dismissed, &self.prompts) {
         prompts(browser_id, crate::BrowserStatus::PermissionDismissed { id });

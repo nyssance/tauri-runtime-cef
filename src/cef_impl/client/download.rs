@@ -114,15 +114,13 @@ wrap_download_handler! {
       } else {
         crate::DownloadState::InProgress
       };
-      with_controls(|controls| match (state, callback.as_deref()) {
-        (crate::DownloadState::InProgress, Some(callback)) => {
-          controls.insert(id, callback.clone());
-        }
-        (crate::DownloadState::InProgress, None) => {}
-        _ => {
-          controls.remove(&id);
-        }
+      // The previous control leaves the lock before it is released.
+      let previous = with_controls(|controls| match (state, callback.as_deref()) {
+        (crate::DownloadState::InProgress, Some(callback)) => controls.insert(id, callback.clone()),
+        (crate::DownloadState::InProgress, None) => None,
+        _ => controls.remove(&id),
       });
+      drop(previous);
       if let (Some(status), Some(browser)) = (&self.status, browser.as_deref()) {
         status(
           browser.identifier(),

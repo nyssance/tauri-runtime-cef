@@ -179,9 +179,42 @@ wrap_with_args! {
     drag_drop_state: Arc<Mutex<DragDropState>>,
     web_content_process_terminate_handler: Option<Arc<tauri_runtime::webview::OnWebContentProcessTerminateHandler>>,
     certificate_errors: crate::CertificateErrorPolicy,
+    auth_prompts: Option<Arc<crate::browser_status::ScopedStatus>>,
   }
 
   impl RequestHandler {
+    /// Hands an authentication challenge to the embedder when it asked for
+    /// them. Called on the IO thread.
+    fn auth_credentials(
+      &self,
+      browser: Option<&mut Browser>,
+      _origin_url: Option<&CefString>,
+      is_proxy: ::std::os::raw::c_int,
+      host: Option<&CefString>,
+      port: ::std::os::raw::c_int,
+      realm: Option<&CefString>,
+      _scheme: Option<&CefString>,
+      callback: Option<&mut AuthCallback>,
+    ) -> ::std::os::raw::c_int {
+      let (Some(prompts), Some(browser), Some(callback)) = (&self.auth_prompts, browser, callback)
+      else {
+        return 0;
+      };
+      let browser_id = browser.identifier();
+      let id = crate::cef_impl::client::auth::remember(browser_id, callback);
+      prompts(
+        browser_id,
+        crate::BrowserStatus::AuthRequest {
+          id,
+          host: host.map(ToString::to_string).unwrap_or_default(),
+          port: u16::try_from(port).unwrap_or_default(),
+          realm: realm.map(ToString::to_string).unwrap_or_default(),
+          is_proxy: is_proxy != 0,
+        },
+      );
+      1
+    }
+
     /// Answers a TLS certificate that does not validate, per
     /// [`CertificateErrorPolicy`](crate::CertificateErrorPolicy).
     ///

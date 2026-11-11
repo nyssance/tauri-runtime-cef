@@ -28,6 +28,7 @@ wrap_with_args! {
     frame_navigation_state: crate::FrameNavigationState,
     cursor_handler: Option<Arc<crate::CursorHandler>>,
     status: Option<Arc<crate::browser_status::ScopedStatus>>,
+    is_surface_guest: bool,
   }
 
   impl DisplayHandler {
@@ -146,8 +147,13 @@ wrap_with_args! {
       let Some(browser) = browser else {
         return;
       };
-      // Popup clients carry the opener's webview id despite owning a separate browser.
-      if browser.is_popup() != 0
+      if let Some(status) = &self.status {
+        status(browser.identifier(), crate::BrowserStatus::Fullscreen(fullscreen != 0));
+      }
+      // Popup clients carry the opener's webview id despite owning a separate browser,
+      // and a surface guest has no native view for the window to give the screen to.
+      if self.is_surface_guest
+        || browser.is_popup() != 0
         || !self.frame_navigation_state.has_browser_id(browser.identifier())
       {
         return;

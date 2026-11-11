@@ -13,6 +13,7 @@ use crate::{
   runtime::{CefRuntime, Message, RuntimeContext},
 };
 
+pub(crate) mod auth;
 mod command;
 mod context_menu;
 mod display;
@@ -20,6 +21,7 @@ mod download;
 mod drag;
 mod find;
 mod frame;
+mod jsdialog;
 mod keyboard;
 mod life_span;
 mod load;
@@ -30,6 +32,8 @@ use command::{TauriCefCommandHandler, TauriCefCommandHandlerArgs};
 use context_menu::TauriCefContextMenuHandler;
 use display::{TauriCefDisplayHandler, TauriCefDisplayHandlerArgs};
 pub use download::cancel_download;
+pub use auth::answer_auth;
+pub use jsdialog::answer_dialog;
 use download::TauriCefDownloadHandler;
 use drag::TauriCefDragHandler;
 pub(crate) use drag::{
@@ -58,6 +62,7 @@ pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
   pub(crate) browser_status_handler: Option<Arc<crate::BrowserStatusHandler>>,
   pub(crate) shortcut_filter: Option<Arc<crate::ShortcutFilter>>,
   pub(crate) prompt_permissions: bool,
+  pub(crate) prompt_dialogs: bool,
   pub(crate) permission_request_handler: Option<Arc<PermissionRequestHandler>>,
   pub(crate) web_content_process_terminate_handler:
     Option<Arc<tauri_runtime::webview::OnWebContentProcessTerminateHandler>>,
@@ -77,6 +82,7 @@ impl<T: UserEvent> Clone for TauriCefBrowserClientHandlers<T> {
       browser_status_handler: self.browser_status_handler.clone(),
       shortcut_filter: self.shortcut_filter.clone(),
       prompt_permissions: self.prompt_permissions,
+      prompt_dialogs: self.prompt_dialogs,
       permission_request_handler: self.permission_request_handler.clone(),
       web_content_process_terminate_handler: self.web_content_process_terminate_handler.clone(),
     }
@@ -152,6 +158,12 @@ wrap_with_args! {
           web_content_process_terminate_handler:
             self.handlers.web_content_process_terminate_handler.clone(),
           certificate_errors: self.context.certificate_errors,
+          // A browser that cannot show CEF's dialogs cannot show its login prompt either.
+          auth_prompts: self
+            .handlers
+            .prompt_dialogs
+            .then(|| self.scoped_status())
+            .flatten(),
         },
       ))
     }
@@ -173,6 +185,7 @@ wrap_with_args! {
       let permission_request_handler = self.handlers.permission_request_handler.clone();
       let shortcut_filter = self.handlers.shortcut_filter.clone();
       let prompt_permissions = self.handlers.prompt_permissions;
+      let prompt_dialogs = self.handlers.prompt_dialogs;
       let family = self.popup_family.clone();
       let create_popup: Arc<life_span::PopupClientFactory> = Arc::new(move |opener, state| {
         let events = state.clone();
@@ -240,6 +253,7 @@ wrap_with_args! {
             })),
             shortcut_filter: shortcut_filter.clone(),
             prompt_permissions,
+            prompt_dialogs,
             ipc_handler: None,
             on_page_load_handler: None,
             document_title_changed_handler: Some(Arc::new(move |title| { if let Some(family) = title_family.upgrade() { family.title(&title_state, title); } })),
@@ -281,6 +295,7 @@ wrap_with_args! {
         cursor_handler: self.cursor_handler.clone(),
         frame_navigation_state: self.frame_navigation_state.clone(),
         status: self.scoped_status(),
+        is_surface_guest: self.is_surface_guest,
       }))
     }
 
@@ -325,6 +340,15 @@ wrap_with_args! {
           .then(|| self.scoped_status())
           .flatten(),
       ))
+    }
+
+    fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
+      self
+        .handlers
+        .prompt_dialogs
+        .then(|| self.scoped_status())
+        .flatten()
+        .map(jsdialog::TauriCefJsDialogHandler::new)
     }
 
     fn find_handler(&self) -> Option<FindHandler> {

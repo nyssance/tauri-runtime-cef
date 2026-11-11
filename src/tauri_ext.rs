@@ -452,6 +452,12 @@ pub trait WebviewBuilderCefExt {
   #[must_use]
   fn prompt_permissions(self) -> Self;
 
+  /// Hand JavaScript dialogs of this webview and its popups to the status
+  /// observer as [`BrowserStatus::Dialog`](crate::BrowserStatus). Required for
+  /// a browser with no native window of its own, where CEF cannot show one.
+  #[must_use]
+  fn prompt_dialogs(self) -> Self;
+
   /// Sets the browser runtime style.
   ///
   /// See [`RuntimeStyle`] for more information.
@@ -530,6 +536,13 @@ where
   ) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.browser_status_handler = Some(Arc::new(handler));
+    });
+    self
+  }
+
+  fn prompt_dialogs(mut self) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.prompt_dialogs = true;
     });
     self
   }

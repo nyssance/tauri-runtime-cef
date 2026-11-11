@@ -28,6 +28,10 @@ pub enum BrowserStatus {
   },
   /// The main frame's address changed, including same-document navigation.
   Address(String),
+  /// The page entered or left HTML fullscreen. A browser with a window of its
+  /// own is taken fullscreen by the runtime; an embedded surface guest has
+  /// none, so its embedder decides what filling the screen means.
+  Fullscreen(bool),
   /// Overall load progress in `0.0..=1.0`.
   Progress(f64),
   /// Candidate icon URLs of the current document, in page order.
@@ -60,6 +64,36 @@ pub enum BrowserStatus {
   PermissionDismissed { id: u64 },
   /// Progress of one download this browser started. Reported until it ends.
   Download(DownloadProgress),
+  /// The page opened a JavaScript dialog and is blocked until
+  /// [`answer_dialog`](crate::answer_dialog).
+  Dialog {
+    id: u64,
+    kind: DialogKind,
+    origin: String,
+    message: String,
+    /// The initial value of a prompt.
+    default_text: String,
+  },
+  /// A pending dialog ended without an answer, e.g. the page went away.
+  DialogDismissed { id: u64 },
+  /// A server or proxy asks for a user name and password; the request waits
+  /// for [`answer_auth`](crate::answer_auth). Reported from CEF's IO thread.
+  AuthRequest {
+    id: u64,
+    host: String,
+    port: u16,
+    realm: String,
+    is_proxy: bool,
+  },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogKind {
+  Alert,
+  Confirm,
+  Prompt,
+  /// The page asks whether to leave it; it supplies no message of its own.
+  BeforeUnload,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
