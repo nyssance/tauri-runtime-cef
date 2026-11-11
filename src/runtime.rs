@@ -468,6 +468,9 @@ pub enum DowngradePolicy {
 ///   tauri_runtime_cef::Cef::default().command_line_arg("disable-gpu", None::<String>),
 /// );
 /// ```
+/// See [`Cef::on_tab_request`].
+pub type TabRequestHandler = Arc<dyn Fn(String) + Send + Sync>;
+
 #[derive(Default)]
 pub struct Cef {
   command_line_args: Vec<(String, Option<String>)>,
@@ -495,6 +498,7 @@ pub struct Cef {
   devtools: DevToolsPolicy,
   debug_environment: DebugEnvironment,
   certificate_errors: CertificateErrorPolicy,
+  tab_request_handler: Option<TabRequestHandler>,
   sandbox: SandboxPolicy,
   downgrade: DowngradePolicy,
   settings_callback: Option<Box<SettingsCallback>>,
@@ -534,6 +538,7 @@ impl fmt::Debug for Cef {
       .field("devtools", &self.devtools)
       .field("debug_environment", &self.debug_environment)
       .field("certificate_errors", &self.certificate_errors)
+      .field("tab_request_handler", &self.tab_request_handler.is_some())
       .field("sandbox", &self.sandbox)
       .field("downgrade", &self.downgrade)
       .field("settings_callback", &self.settings_callback.is_some())
@@ -988,6 +993,19 @@ impl Cef {
     self
   }
 
+  /// Receives the address of a page the browser wants opened in a new tab on its own
+  /// account, not on behalf of a page: an extension calling `tabs.create`, say.
+  ///
+  /// An application that composes its pages itself has no Chrome window for such a tab;
+  /// the modified CEF this runtime targets suppresses the window and reports the address
+  /// here instead. The handler runs on the main thread, for `http`, `https` and
+  /// `chrome-extension` addresses. Without a handler the request is dropped.
+  #[must_use]
+  pub fn on_tab_request<F: Fn(String) + Send + Sync + 'static>(mut self, handler: F) -> Self {
+    self.tab_request_handler = Some(Arc::new(handler));
+    self
+  }
+
   /// How Chromium resolves the proxy for every request.
   ///
   /// Defaults to [`ProxyConfig::System`], Chromium's own behaviour.
@@ -1252,6 +1270,8 @@ pub(crate) struct RuntimeContext<T: UserEvent> {
   /// What to do about a navigation whose TLS certificate does not validate. See
   /// [`Cef::certificate_errors`].
   pub(crate) certificate_errors: CertificateErrorPolicy,
+  /// See [`Cef::on_tab_request`].
+  pub(crate) tab_request_handler: Option<TabRequestHandler>,
   /// Whether [`Cef::devtools`] lets this application open DevTools at all. Combined with
   /// the per-webview `WebviewAttributes::devtools`, which can only narrow it further.
   pub(crate) devtools_allowed: bool,
@@ -3191,6 +3211,7 @@ impl<T: UserEvent> CefRuntime<T> {
       devtools: devtools_policy,
       debug_environment,
       certificate_errors,
+      tab_request_handler,
       sandbox: sandbox_policy,
       downgrade: downgrade_policy,
       settings_callback,
@@ -3460,6 +3481,7 @@ impl<T: UserEvent> CefRuntime<T> {
       profile_preferences: Arc::new(profile_preferences),
       content_settings: Arc::new(content_settings),
       certificate_errors,
+      tab_request_handler,
       devtools_allowed,
     };
 

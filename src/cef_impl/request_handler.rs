@@ -248,6 +248,26 @@ wrap_with_args! {
         }
       }
     }
+    /// The browser asks for a tab on its own account; see [`crate::Cef::on_tab_request`].
+    /// A page's own links and `window.open` never come this way: they are popups.
+    fn on_open_urlfrom_tab(
+      &self,
+      _browser: Option<&mut Browser>,
+      _frame: Option<&mut Frame>,
+      target_url: Option<&CefString>,
+      _target_disposition: WindowOpenDisposition,
+      user_gesture: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int {
+      // A user's own modified click on a link carries the gesture and stays with CEF.
+      if user_gesture != 0 {
+        return 0;
+      }
+      if let (Some(handler), Some(url)) = (&self.context.tab_request_handler, target_url) {
+        handler(url.to_string());
+      }
+      1
+    }
+
     fn on_render_process_terminated(
       &self,
       browser: Option<&mut Browser>,
