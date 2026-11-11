@@ -12,7 +12,7 @@ use std::{
   path::PathBuf,
   sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering},
     mpsc::{self, Receiver, Sender},
   },
   time::Duration,
@@ -1233,6 +1233,9 @@ pub(crate) struct RuntimeContext<T: UserEvent> {
   next_window_id: Arc<AtomicU32>,
   next_webview_id: Arc<AtomicU32>,
   current_dispatch: Arc<MainThreadDispatchSlot<T>>,
+  /// Scripts waiting in the message queue. While any is waiting, a later script is queued
+  /// behind it instead of running inline, so a page receives scripts in the order sent.
+  queued_scripts: Arc<AtomicUsize>,
   pub(crate) app_wide_theme: Arc<Mutex<Option<Theme>>>,
   pub(crate) cef_pump: CefExternalPump,
   /// Root cache path passed to [`cef::Settings::cache_path`] during
@@ -1361,6 +1364,16 @@ fn dispatches_run_event<T: UserEvent>(message: &Message<T>) -> bool {
   }
 }
 
+fn is_script<T: UserEvent>(message: &Message<T>) -> bool {
+  matches!(
+    message,
+    Message::Webview {
+      message: WebviewMessage::EvaluateScript(_) | WebviewMessage::EvaluateScriptWithCallback(..),
+      ..
+    }
+  )
+}
+
 #[allow(clippy::result_large_err)]
 fn handle_main_thread_message<T: UserEvent>(
   context: &RuntimeContext<T>,
@@ -1402,8 +1415,22 @@ impl<T: UserEvent> fmt::Debug for RuntimeContext<T> {
 }
 
 impl<T: UserEvent> RuntimeContext<T> {
+  /// Called for every message taken off the queue, before it is handled.
+  fn script_left_queue(&self, message: &Message<T>) {
+    if is_script(message) {
+      self.queued_scripts.fetch_sub(1, Ordering::SeqCst);
+    }
+  }
+
   pub(crate) fn send_message(&self, message: Message<T>) -> Result<()> {
-    let message = if self.is_main_thread() {
+    // The main thread runs a message inline only while the event loop is dispatching;
+    // outside of that (a CEF callback from the message pump, say) the message is queued.
+    // A script run inline would overtake one queued a moment earlier, and the page would
+    // see events out of order: a "loading started" before the "loading finished" that
+    // preceded it.
+    let behind_queued_script =
+      is_script(&message) && self.queued_scripts.load(Ordering::SeqCst) > 0;
+    let message = if self.is_main_thread() && !behind_queued_script {
       match handle_main_thread_message(self, message) {
         Ok(()) => return Ok(()),
         Err(message) => message,
@@ -1412,6 +1439,9 @@ impl<T: UserEvent> RuntimeContext<T> {
       message
     };
 
+    if is_script(&message) {
+      self.queued_scripts.fetch_add(1, Ordering::SeqCst);
+    }
     self
       .sender
       .send(message)
@@ -1805,6 +1835,7 @@ impl<T: UserEvent> WinitCefApp<T> {
 
   fn drain_messages(&mut self, event_loop: &dyn ActiveEventLoop) {
     while let Ok(message) = self.receiver.try_recv() {
+      self.context.script_left_queue(&message);
       self.handle_message(event_loop, message);
     }
   }
@@ -3422,6 +3453,7 @@ impl<T: UserEvent> CefRuntime<T> {
       next_window_id: Default::default(),
       next_webview_id: Default::default(),
       current_dispatch,
+      queued_scripts: Default::default(),
       app_wide_theme: Default::default(),
       cef_pump,
       cache_path: Arc::new(cache_path.clone()),
@@ -3750,6 +3782,7 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
 
   fn run_iteration<F: FnMut(RunEvent<T>) + 'static>(&mut self, mut callback: F) {
     while let Ok(message) = self.receiver.try_recv() {
+      self.context.script_left_queue(&message);
       if let Message::UserEvent(event) = message {
         callback(RunEvent::UserEvent(event));
       }
