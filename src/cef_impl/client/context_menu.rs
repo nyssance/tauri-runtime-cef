@@ -170,9 +170,108 @@ fn remove_redundant_separators(model: &MenuModel) {
   {}
 }
 
+struct PendingMenu {
+  browser_id: i32,
+  callback: RunContextMenuCallback,
+}
+
+/// Confined to CEF's UI thread: menus are asked for there and
+/// [`answer_context_menu`] requires it. A callback is released only after the
+/// registry is unlocked.
+struct PendingMenus(std::collections::HashMap<u64, PendingMenu>);
+// SAFETY: confined to the UI thread, as documented above.
+unsafe impl Send for PendingMenus {}
+static PENDING: std::sync::Mutex<Option<PendingMenus>> = std::sync::Mutex::new(None);
+static NEXT_MENU: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn with_pending<T>(
+  action: impl FnOnce(&mut std::collections::HashMap<u64, PendingMenu>) -> T,
+) -> T {
+  let mut pending = PENDING
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  action(
+    &mut pending
+      .get_or_insert_with(|| PendingMenus(Default::default()))
+      .0,
+  )
+}
+
+/// Answer a [`BrowserStatus::ContextMenu`](crate::BrowserStatus): run the entry
+/// with this command, or none when the menu was dismissed. Must be called on the
+/// UI thread. Returns `false` when the menu is no longer pending.
+pub fn answer_context_menu(id: u64, command: Option<i32>) -> bool {
+  let Some(menu) = with_pending(|pending| pending.remove(&id)) else {
+    return false;
+  };
+  match command {
+    Some(command) => menu.callback.cont(command, EventFlags::default()),
+    None => menu.callback.cancel(),
+  }
+  true
+}
+
+/// A browser that closes takes its unanswered menu with it.
+pub(crate) fn forget_browser(browser_id: i32) {
+  let forgotten: Vec<PendingMenu> = with_pending(|pending| {
+    let ids: Vec<u64> = pending
+      .iter()
+      .filter(|(_, menu)| menu.browser_id == browser_id)
+      .map(|(id, _)| *id)
+      .collect();
+    ids
+      .into_iter()
+      .filter_map(|id| pending.remove(&id))
+      .collect()
+  });
+  drop(forgotten);
+}
+
+/// A menu deeper than any real one is cut off rather than followed.
+const MAX_MENU_DEPTH: usize = 4;
+
+fn menu_items(model: &MenuModel, depth: usize) -> Vec<crate::ContextMenuItem> {
+  use crate::ContextMenuItemKind as Kind;
+  let kind_of = |kind: MenuItemType| {
+    let is = |other: cef_menu_item_type_t| kind == MenuItemType::from(other);
+    if is(cef_menu_item_type_t::MENUITEMTYPE_SEPARATOR) {
+      Kind::Separator
+    } else if is(cef_menu_item_type_t::MENUITEMTYPE_SUBMENU) {
+      Kind::Submenu
+    } else if is(cef_menu_item_type_t::MENUITEMTYPE_CHECK) {
+      Kind::Check
+    } else if is(cef_menu_item_type_t::MENUITEMTYPE_RADIO) {
+      Kind::Radio
+    } else {
+      Kind::Command
+    }
+  };
+  (0..model.count())
+    .filter(|index| model.is_visible_at(*index) != 0)
+    .map(|index| {
+      let kind = kind_of(model.type_at(index));
+      crate::ContextMenuItem {
+        command: model.command_id_at(index),
+        label: CefString::from(&model.label_at(index)).to_string(),
+        kind,
+        enabled: model.is_enabled_at(index) != 0,
+        checked: model.is_checked_at(index) != 0,
+        items: match model.sub_menu_at(index) {
+          Some(submenu) if kind == Kind::Submenu && depth < MAX_MENU_DEPTH => {
+            menu_items(&submenu, depth + 1)
+          }
+          _ => Vec::new(),
+        },
+      }
+    })
+    .collect()
+}
+
 wrap_context_menu_handler! {
   pub struct TauriCefContextMenuHandler {
     devtools_enabled: bool,
+    // Set for a browser with no native window to show a menu on.
+    status: Option<std::sync::Arc<crate::browser_status::ScopedStatus>>,
   }
 
   impl ContextMenuHandler {
@@ -204,6 +303,48 @@ wrap_context_menu_handler! {
 
       // An empty model is left empty on purpose: CEF then shows no menu at all,
       // which is the right outcome for a menu with nothing in it.
+    }
+
+    /// CEF's own menu hangs on the browser's native window. A browser without
+    /// one hands the menu to the embedder, which shows it and answers.
+    fn run_context_menu(
+      &self,
+      browser: Option<&mut Browser>,
+      _frame: Option<&mut Frame>,
+      params: Option<&mut ContextMenuParams>,
+      model: Option<&mut MenuModel>,
+      callback: Option<&mut RunContextMenuCallback>,
+    ) -> ::std::os::raw::c_int {
+      let (Some(status), Some(browser), Some(params), Some(model), Some(callback)) =
+        (&self.status, browser, params, model, callback)
+      else {
+        return 0;
+      };
+      let browser_id = browser.identifier();
+      let text = |value: CefStringUserfree| CefString::from(&value).to_string();
+      let image = params.media_type()
+        == ContextMenuMediaType::from(cef::sys::cef_context_menu_media_type_t::CM_MEDIATYPE_IMAGE);
+      // One menu at a time: asking again dismisses the one before.
+      forget_browser(browser_id);
+      let id = NEXT_MENU.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      let replaced = with_pending(|pending| {
+        pending.insert(id, PendingMenu { browser_id, callback: callback.clone() })
+      });
+      drop(replaced);
+      status(
+        browser_id,
+        crate::BrowserStatus::ContextMenu(crate::ContextMenu {
+          id,
+          x: params.xcoord(),
+          y: params.ycoord(),
+          link_url: text(params.link_url()),
+          image_url: if image { text(params.source_url()) } else { String::new() },
+          selection_text: text(params.selection_text()),
+          editable: params.is_editable() != 0,
+          items: menu_items(model, 0),
+        }),
+      );
+      1
     }
   }
 }

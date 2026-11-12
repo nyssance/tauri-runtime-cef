@@ -255,6 +255,7 @@ wrap_with_args! {
       let Some(browser) = browser else { return; };
       super::permission::forget_browser(browser.identifier());
       super::jsdialog::forget_browser(browser.identifier());
+      super::context_menu::forget_browser(browser.identifier());
       super::auth::forget_browser(browser.identifier());
       if let Some(family) = self.popup_family.upgrade() {
         family.closed(&self.frame_navigation_state, browser.identifier());

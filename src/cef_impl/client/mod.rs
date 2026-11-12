@@ -28,24 +28,25 @@ mod load;
 mod permission;
 mod process;
 
+pub use auth::answer_auth;
 use command::{TauriCefCommandHandler, TauriCefCommandHandlerArgs};
 use context_menu::TauriCefContextMenuHandler;
+pub use context_menu::answer_context_menu;
 use display::{TauriCefDisplayHandler, TauriCefDisplayHandlerArgs};
-pub use download::cancel_download;
-pub use auth::answer_auth;
-pub use jsdialog::answer_dialog;
 use download::TauriCefDownloadHandler;
+pub use download::cancel_download;
 use drag::TauriCefDragHandler;
 pub(crate) use drag::{
   DragDropEventTarget, DragDropScriptEvent, DragDropState, WebDragDropResourceRequestHandler,
   WebDragDropResourceRequestHandlerArgs, drag_drop_initialization_script, event_from_script_event,
 };
+pub use jsdialog::answer_dialog;
 use keyboard::TauriCefKeyboardHandler;
 use life_span::{TauriCefChildLifeSpanHandler, TauriCefChildLifeSpanHandlerArgs};
 use load::TauriCefLoadHandler;
-pub use permission::{PermissionAnswer, answer_permission_request};
 pub(crate) use permission::PermissionRequestHandler;
 use permission::TauriCefPermissionHandler;
+pub use permission::{PermissionAnswer, answer_permission_request};
 pub(crate) use process::TauriCefBrowserProcessHandler;
 
 pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
@@ -309,7 +310,14 @@ wrap_with_args! {
     }
 
     fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
-      Some(TauriCefContextMenuHandler::new(self.devtools_enabled))
+      Some(TauriCefContextMenuHandler::new(
+        self.devtools_enabled,
+        self
+          .handlers
+          .prompt_dialogs
+          .then(|| self.scoped_status())
+          .flatten(),
+      ))
     }
 
     fn keyboard_handler(&self) -> Option<KeyboardHandler> {

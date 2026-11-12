@@ -76,6 +76,10 @@ pub enum BrowserStatus {
   },
   /// A pending dialog ended without an answer, e.g. the page went away.
   DialogDismissed { id: u64 },
+  /// The user asked for the context menu of something in the page. Nothing is
+  /// shown until the embedder shows it; the request waits for
+  /// [`answer_context_menu`](crate::answer_context_menu).
+  ContextMenu(ContextMenu),
   /// A server or proxy asks for a user name and password; the request waits
   /// for [`answer_auth`](crate::answer_auth). Reported from CEF's IO thread.
   AuthRequest {
@@ -85,6 +89,47 @@ pub enum BrowserStatus {
     realm: String,
     is_proxy: bool,
   },
+}
+
+/// What a context menu was asked for, and the entries the browser offers there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextMenu {
+  pub id: u64,
+  /// Where, in logical points, as CEF reports it: from the top left corner of
+  /// the view the page is shown in, which for an embedded surface guest is the
+  /// window it is composited into.
+  pub x: i32,
+  pub y: i32,
+  /// The link under the pointer; empty when there is none.
+  pub link_url: String,
+  /// The image under the pointer; empty when there is none.
+  pub image_url: String,
+  pub selection_text: String,
+  pub editable: bool,
+  pub items: Vec<ContextMenuItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextMenuItem {
+  /// What [`answer_context_menu`](crate::answer_context_menu) is given to run
+  /// this entry. A `MENU_ID_*` value for the browser's own entries.
+  pub command: i32,
+  /// As the browser words it; an entry an extension added carries its title.
+  pub label: String,
+  pub kind: ContextMenuItemKind,
+  pub enabled: bool,
+  pub checked: bool,
+  /// The entries of a submenu.
+  pub items: Vec<ContextMenuItem>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextMenuItemKind {
+  Command,
+  Check,
+  Radio,
+  Separator,
+  Submenu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
