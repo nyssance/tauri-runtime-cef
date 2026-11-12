@@ -963,6 +963,8 @@ impl<T: UserEvent> WinitCefApp<T> {
       .map(|scheme| format!("{scheme}.localhost"))
       .collect();
     let real_initial_url = pending.url.as_str().to_string();
+    // A surface guest shares its owner's request context unless it is private.
+    let private_guest = pending.webview_attributes.incognito;
     let (browser_tx, browser_rx) = mpsc::channel();
     let (init_done, on_initialized) = request_context::deferred_init_continuation({
       let scheme_registry = scheme_registry.clone();
@@ -978,12 +980,20 @@ impl<T: UserEvent> WinitCefApp<T> {
         // navigation; the real URL is loaded once the document-start script is set.
         let initial_url = CefString::from(INITIAL_LOAD_URL);
         let created = if let Some(owner) = &surface_embed_parent {
+          // The modified CEF reads this from the guest's extra info and gives it a
+          // profile of its own, in memory, that ends with the guest.
+          let mut extra_info = private_guest
+            .then(cef::dictionary_value_create)
+            .flatten()
+            .inspect(|info| {
+              info.set_bool(Some(&CefString::from("cef_surface_guest_private")), 1);
+            });
           owner.host().and_then(|host| {
             host.create_surface_guest_sync(
               Some(&mut client),
               Some(&initial_url),
               Some(&settings),
-              None,
+              extra_info.as_mut(),
             )
           })
         } else {
