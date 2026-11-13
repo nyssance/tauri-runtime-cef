@@ -452,6 +452,11 @@ pub trait WebviewBuilderCefExt {
   #[must_use]
   fn prompt_permissions(self) -> Self;
 
+  /// Start a surface guest of ordinary browser content on a saved session
+  /// history, showing the page it showed, instead of on the builder's address.
+  #[must_use]
+  fn session_history(self, history: crate::SessionHistory) -> Self;
+
   /// Hand JavaScript dialogs of this webview and its popups to the status
   /// observer as [`BrowserStatus::Dialog`](crate::BrowserStatus), and their
   /// context menus as [`BrowserStatus::ContextMenu`](crate::BrowserStatus).
@@ -545,6 +550,13 @@ where
   fn prompt_dialogs(mut self) -> Self {
     with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
       attributes.prompt_dialogs = true;
+    });
+    self
+  }
+
+  fn session_history(mut self, history: crate::SessionHistory) -> Self {
+    with_cef_webview_attributes(self.runtime_specific_attributes_mut(), |attributes| {
+      attributes.session_history = Some(history);
     });
     self
   }

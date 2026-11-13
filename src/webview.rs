@@ -962,6 +962,14 @@ impl<T: UserEvent> WinitCefApp<T> {
     let real_initial_url = pending.url.as_str().to_string();
     // A surface guest shares its owner's request context unless it is private.
     let private_guest = pending.webview_attributes.incognito;
+    // A resumed tab starts on its own history; the modified CEF loads the page
+    // it showed, so neither the placeholder nor the address is loaded here.
+    let session_history = pending
+      .runtime_specific_attributes
+      .session_history
+      .clone()
+      .filter(|history| surface_embed_parent.is_some() && !history.entries.is_empty());
+    let resumes_history = session_history.is_some();
     let (browser_tx, browser_rx) = mpsc::channel();
     let (init_done, on_initialized) = request_context::deferred_init_continuation({
       let scheme_registry = scheme_registry.clone();
@@ -982,6 +990,31 @@ impl<T: UserEvent> WinitCefApp<T> {
           // says where it is about to go, since it is created on a placeholder: a
           // tab an extension asked for at that address is then this one.
           let mut extra_info = cef::dictionary_value_create().inspect(|info| {
+            if let Some(history) = &session_history
+              && let Some(mut list) = cef::list_value_create()
+            {
+              for (index, entry) in history.entries.iter().enumerate() {
+                if let Some(mut saved) = cef::dictionary_value_create() {
+                  saved.set_string(
+                    Some(&CefString::from("url")),
+                    Some(&CefString::from(entry.url.as_str())),
+                  );
+                  saved.set_string(
+                    Some(&CefString::from("title")),
+                    Some(&CefString::from(entry.title.as_str())),
+                  );
+                  list.set_dictionary(index, Some(&mut saved));
+                }
+              }
+              info.set_list(
+                Some(&CefString::from("cef_surface_guest_history")),
+                Some(&mut list),
+              );
+              info.set_int(
+                Some(&CefString::from("cef_surface_guest_history_index")),
+                history.shown as ::std::os::raw::c_int,
+              );
+            }
             if private_guest {
               info.set_bool(Some(&CefString::from("cef_surface_guest_private")), 1);
             } else {
@@ -1054,14 +1087,16 @@ impl<T: UserEvent> WinitCefApp<T> {
         if let Some(user_agent) = &user_agent {
           apply_user_agent_override(&host, user_agent);
         }
-        load_initial_url_after_registering_initialization_scripts(
-          &browser,
-          &initialization_scripts,
-          &custom_protocol_scheme,
-          &custom_scheme_domain_names,
-          &real_initial_url,
-          &pending_initial_loads,
-        );
+        if !resumes_history {
+          load_initial_url_after_registering_initialization_scripts(
+            &browser,
+            &initialization_scripts,
+            &custom_protocol_scheme,
+            &custom_scheme_domain_names,
+            &real_initial_url,
+            &pending_initial_loads,
+          );
+        }
 
         browser_tx
           .send(AppWebview {
@@ -1608,6 +1643,60 @@ pub enum RuntimeStyle {
 ///   drops Back and Forward for the same reason. `WebviewDispatch::go_back` and
 ///   `go_forward` are untouched, and an app that navigates its webview normally
 ///   can take the accelerators back with [`ChromeCommandGroup::History`].
+/// One page of a browser's session history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEntry {
+  pub url: String,
+  pub title: String,
+}
+
+/// A browser's session history: its pages in order, and the one it shows.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SessionHistory {
+  pub entries: Vec<SessionEntry>,
+  pub shown: usize,
+}
+
+cef::wrap_navigation_entry_visitor! {
+  struct CollectSessionHistory {
+    history: Arc<Mutex<SessionHistory>>,
+  }
+
+  impl NavigationEntryVisitor {
+    fn visit(
+      &self,
+      entry: Option<&mut cef::NavigationEntry>,
+      current: ::std::os::raw::c_int,
+      _index: ::std::os::raw::c_int,
+      _total: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int {
+      if let Some(entry) = entry {
+        let mut history = self.history.lock().unwrap();
+        if current != 0 {
+          history.shown = history.entries.len();
+        }
+        history.entries.push(SessionEntry {
+          url: CefString::from(&entry.url()).to_string(),
+          title: CefString::from(&entry.title()).to_string(),
+        });
+      }
+      1
+    }
+  }
+}
+
+/// The session history of a browser. Call on the CEF UI thread, where the
+/// entries are visited before this returns.
+pub fn session_history(browser: &Browser) -> SessionHistory {
+  let history = Arc::new(Mutex::new(SessionHistory::default()));
+  if let Some(host) = browser.host() {
+    let mut visitor = CollectSessionHistory::new(history.clone());
+    host.navigation_entries(Some(&mut visitor), 0);
+  }
+  let collected = history.lock().unwrap().clone();
+  collected
+}
+
 #[derive(Default, Clone)]
 pub struct CefWebviewAttributes {
   /// Windowless rendering and application-provided CEF callbacks.
@@ -1629,6 +1718,8 @@ pub struct CefWebviewAttributes {
   pub prompt_permissions: bool,
   /// Offer JavaScript dialogs to the status observer instead of CEF's native ones.
   pub prompt_dialogs: bool,
+  /// A surface guest that resumes a tab: the session history it starts with.
+  pub session_history: Option<SessionHistory>,
   /// The browser runtime style, see [`RuntimeStyle`]. CEF picks one when not set.
   pub runtime_style: Option<RuntimeStyle>,
   /// Observer of the native lifecycle events of every frame of the webview.
