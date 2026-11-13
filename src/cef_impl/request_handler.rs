@@ -255,7 +255,7 @@ wrap_with_args! {
       _browser: Option<&mut Browser>,
       _frame: Option<&mut Frame>,
       target_url: Option<&CefString>,
-      _target_disposition: WindowOpenDisposition,
+      target_disposition: WindowOpenDisposition,
       user_gesture: ::std::os::raw::c_int,
     ) -> ::std::os::raw::c_int {
       // A user's own modified click on a link carries the gesture and stays with CEF.
@@ -263,7 +263,9 @@ wrap_with_args! {
         return 0;
       }
       if let (Some(handler), Some(url)) = (&self.context.tab_request_handler, target_url) {
-        handler(url.to_string());
+        let background = *target_disposition.as_ref()
+          == cef::sys::cef_window_open_disposition_t::CEF_WOD_NEW_BACKGROUND_TAB;
+        handler(crate::TabRequest { url: url.to_string(), background });
       }
       1
     }

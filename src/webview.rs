@@ -860,10 +860,7 @@ impl<T: UserEvent> WinitCefApp<T> {
         .runtime_specific_attributes
         .browser_status_handler
         .clone(),
-      shortcut_filter: pending
-        .runtime_specific_attributes
-        .shortcut_filter
-        .clone(),
+      shortcut_filter: pending.runtime_specific_attributes.shortcut_filter.clone(),
       prompt_permissions: pending.runtime_specific_attributes.prompt_permissions,
       prompt_dialogs: pending.runtime_specific_attributes.prompt_dialogs,
       console_message_handler: pending
@@ -980,14 +977,20 @@ impl<T: UserEvent> WinitCefApp<T> {
         // navigation; the real URL is loaded once the document-start script is set.
         let initial_url = CefString::from(INITIAL_LOAD_URL);
         let created = if let Some(owner) = &surface_embed_parent {
-          // The modified CEF reads this from the guest's extra info and gives it a
-          // profile of its own, in memory, that ends with the guest.
-          let mut extra_info = private_guest
-            .then(cef::dictionary_value_create)
-            .flatten()
-            .inspect(|info| {
+          // The modified CEF reads two things from the guest's extra info. A private
+          // guest gets a profile of its own, in memory, that ends with it. Any other
+          // says where it is about to go, since it is created on a placeholder: a
+          // tab an extension asked for at that address is then this one.
+          let mut extra_info = cef::dictionary_value_create().inspect(|info| {
+            if private_guest {
               info.set_bool(Some(&CefString::from("cef_surface_guest_private")), 1);
-            });
+            } else {
+              info.set_string(
+                Some(&CefString::from("cef_surface_guest_tab_url")),
+                Some(&CefString::from(real_initial_url.as_str())),
+              );
+            }
+          });
           owner.host().and_then(|host| {
             host.create_surface_guest_sync(
               Some(&mut client),

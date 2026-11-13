@@ -468,8 +468,16 @@ pub enum DowngradePolicy {
 ///   tauri_runtime_cef::Cef::default().command_line_arg("disable-gpu", None::<String>),
 /// );
 /// ```
+/// A page the browser wants opened in a new tab; see [`Cef::on_tab_request`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabRequest {
+  pub url: String,
+  /// Asked for behind the tab the user is looking at, not in its place.
+  pub background: bool,
+}
+
 /// See [`Cef::on_tab_request`].
-pub type TabRequestHandler = Arc<dyn Fn(String) + Send + Sync>;
+pub type TabRequestHandler = Arc<dyn Fn(TabRequest) + Send + Sync>;
 
 #[derive(Default)]
 pub struct Cef {
@@ -1000,8 +1008,11 @@ impl Cef {
   /// the modified CEF this runtime targets suppresses the window and reports the address
   /// here instead. The handler runs on the main thread, for `http`, `https` and
   /// `chrome-extension` addresses. Without a handler the request is dropped.
+  ///
+  /// The guest the application then creates for exactly that address is, to the
+  /// extension that asked, the tab it was told of: it keeps the identity given.
   #[must_use]
-  pub fn on_tab_request<F: Fn(String) + Send + Sync + 'static>(mut self, handler: F) -> Self {
+  pub fn on_tab_request<F: Fn(TabRequest) + Send + Sync + 'static>(mut self, handler: F) -> Self {
     self.tab_request_handler = Some(Arc::new(handler));
     self
   }
