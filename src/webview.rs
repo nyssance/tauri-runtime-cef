@@ -1003,6 +1003,12 @@ impl<T: UserEvent> WinitCefApp<T> {
                     Some(&CefString::from("title")),
                     Some(&CefString::from(entry.title.as_str())),
                   );
+                  if let Some(state) = &entry.state {
+                    saved.set_string(
+                      Some(&CefString::from("state")),
+                      Some(&CefString::from(state.as_str())),
+                    );
+                  }
                   list.set_dictionary(index, Some(&mut saved));
                 }
               }
@@ -1655,6 +1661,10 @@ pub enum RuntimeStyle {
 pub struct SessionEntry {
   pub url: String,
   pub title: String,
+  /// The state the page was left in (scroll position, form contents), as the
+  /// modified CEF encodes it for `CefExtensions.getPageState`. A browser's own
+  /// history is read without it; a guest that resumes a history takes it.
+  pub state: Option<String>,
 }
 
 /// A browser's session history: its pages in order, and the one it shows.
@@ -1685,6 +1695,7 @@ cef::wrap_navigation_entry_visitor! {
         history.entries.push(SessionEntry {
           url: CefString::from(&entry.url()).to_string(),
           title: CefString::from(&entry.title()).to_string(),
+          state: None,
         });
       }
       1
