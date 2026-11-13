@@ -1616,6 +1616,13 @@ pub enum RuntimeStyle {
 /// `.on_permission_request(|_| PermissionResponse::Allow)` would silently hand any
 /// page in the webview a full-desktop stream.
 ///
+/// An embedder that prompts for itself (`BrowserStatus::PermissionRequest`) is
+/// asked about `DisplayCapture` like any other kind. Its `Allow` is for that one
+/// request: on macOS the user then chooses a display (`PermissionAnswer::Allow`)
+/// or a window (`PermissionAnswer::AllowWindow`) in the system's own picker and
+/// closing it refuses the request; elsewhere the whole screen is shared, so the
+/// embedder's prompt has to say so.
+///
 /// # Chrome accelerators an app window does not get
 ///
 /// A Chrome style browser keeps its whole accelerator table live even hosted as a

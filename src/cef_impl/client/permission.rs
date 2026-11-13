@@ -68,6 +68,10 @@ const DESKTOP_AUDIO_CAPTURE: u32 =
 const DESKTOP_VIDEO_CAPTURE: u32 =
   MediaPermissionType::CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE as u32;
 
+/// Understood by the patched CEF beside `DESKTOP_VIDEO_CAPTURE` in an answer:
+/// the system's picker offers windows instead of displays.
+const DESKTOP_WINDOW_CHOICE: u32 = 1 << 16;
+
 /// The bits a `getDisplayMedia()` request sets. Never granted from here; see
 /// [`grants_desktop_capture`].
 const DESKTOP_CAPTURE: u32 = DESKTOP_AUDIO_CAPTURE | DESKTOP_VIDEO_CAPTURE;
@@ -184,6 +188,9 @@ enum AppDecision {
 pub enum PermissionAnswer {
   /// Granted, and remembered for the origin.
   Allow,
+  /// `Allow`, and for a screen share the user chooses among windows instead
+  /// of among displays.
+  AllowWindow,
   /// Refused, and remembered for the origin.
   Deny,
   /// Left unanswered: nothing is granted and nothing is remembered, so the
@@ -219,9 +226,17 @@ unsafe impl Send for PendingRequests {}
 static PENDING: std::sync::Mutex<Option<PendingRequests>> = std::sync::Mutex::new(None);
 static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn with_pending<T>(action: impl FnOnce(&mut std::collections::HashMap<u64, PendingRequest>) -> T) -> T {
-  let mut pending = PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-  action(&mut pending.get_or_insert_with(|| PendingRequests(Default::default())).0)
+fn with_pending<T>(
+  action: impl FnOnce(&mut std::collections::HashMap<u64, PendingRequest>) -> T,
+) -> T {
+  let mut pending = PENDING
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  action(
+    &mut pending
+      .get_or_insert_with(|| PendingRequests(Default::default()))
+      .0,
+  )
 }
 
 fn remember(request: PendingRequest) -> u64 {
@@ -238,16 +253,21 @@ fn remember(request: PendingRequest) -> u64 {
 ///
 /// An accepted prompt is persisted for its origin by Chromium, exactly as a
 /// click on a browser's own Allow button. Camera and microphone are granted for
-/// the request and recorded as content settings; the desktop is never granted
-/// from here.
+/// the request and recorded as content settings. A `DisplayCapture` request
+/// allowed here is for that request alone: on macOS the user then chooses a
+/// display or a window in the system's picker, elsewhere the whole screen is
+/// shared.
 pub fn answer_permission_request(id: u64, answer: PermissionAnswer) -> bool {
   let Some(request) = with_pending(|pending| pending.remove(&id)) else {
     return false;
   };
-  let allow = answer == PermissionAnswer::Allow;
+  let allow = matches!(
+    answer,
+    PermissionAnswer::Allow | PermissionAnswer::AllowWindow
+  );
   match request.answer {
     PendingAnswer::Prompt(callback) => callback.cont(match answer {
-      PermissionAnswer::Allow => PermissionRequestResult::ACCEPT,
+      PermissionAnswer::Allow | PermissionAnswer::AllowWindow => PermissionRequestResult::ACCEPT,
       PermissionAnswer::Deny => PermissionRequestResult::DENY,
       PermissionAnswer::Dismiss => PermissionRequestResult::DISMISS,
     }),
@@ -257,12 +277,15 @@ pub fn answer_permission_request(id: u64, answer: PermissionAnswer) -> bool {
       origin,
       requested,
     } => {
+      // An allowed desktop request is finished by the user in the system's own
+      // picker where there is one (macOS), which names what is shared; elsewhere
+      // it shares the whole screen. CEF takes all of a request or none of it.
       let allowed = if allow {
-        requested & ALLOY_MEDIA_PERMISSIONS
+        requested & (ALLOY_MEDIA_PERMISSIONS | DESKTOP_CAPTURE)
       } else {
         0
       };
-      if allowed != 0 {
+      if allowed & ALLOY_MEDIA_PERMISSIONS != 0 {
         let origin = origin.as_deref().map(CefString::from);
         allow_content_settings(
           browser.host().as_ref(),
@@ -270,7 +293,12 @@ pub fn answer_permission_request(id: u64, answer: PermissionAnswer) -> bool {
           &media_content_settings(allowed),
         );
       }
-      callback.cont(allowed);
+      let windows = answer == PermissionAnswer::AllowWindow && allowed & DESKTOP_VIDEO_CAPTURE != 0;
+      callback.cont(if windows {
+        allowed | DESKTOP_WINDOW_CHOICE
+      } else {
+        allowed
+      });
     }
   }
   true
@@ -357,11 +385,10 @@ wrap_permission_handler! {
         }
         AppDecision::NoOpinion => {
           // The embedder prompts: nothing is granted until it answers. A desktop
-          // capture request is never the embedder's to grant; see below.
+          // capture request is asked about as `PermissionKind::DisplayCapture`.
           if let (Some(prompts), Some(browser), Some(callback)) =
             (&self.prompts, host.as_ref().and_then(|host| host.browser()), callback.as_deref())
-            && !grants_desktop_capture(requested_permissions)
-            && requested_permissions & ALLOY_MEDIA_PERMISSIONS != 0
+            && requested_permissions & (ALLOY_MEDIA_PERMISSIONS | DESKTOP_CAPTURE) != 0
           {
             let browser_id = browser.identifier();
             let origin = requesting_origin.map(ToString::to_string);
