@@ -1,0 +1,69 @@
+# Publishes @nyssance/tauri-runtime-cef and @nyssance/cef-rs when a version tag is pushed here.
+# The bindings are taken from nyssance/cef-rs at the same tag. npm trusts this workflow
+# (trusted publishing), so no token is stored anywhere. Run it by hand to check the packages
+# without publishing.
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag to package, such as v158.0.25
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      # The packaging script as of the commit that runs this workflow.
+      - uses: actions/checkout@v5
+        with:
+          path: tools
+          sparse-checkout: .github
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          path: runtime
+      - uses: actions/checkout@v5
+        with:
+          repository: nyssance/cef-rs
+          ref: ${{ env.TAG }}
+          path: bindings
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+      - name: Package
+        run: python3 tools/.github/pack-npm.py "${TAG#v}" runtime bindings packages
+      - name: Publish
+        if: github.event_name == 'push'
+        run: |
+          for package in cef-rs tauri-runtime-cef; do
+            if npm view "@nyssance/$package@${TAG#v}" version >/dev/null 2>&1; then
+              echo "@nyssance/$package@${TAG#v} is already published"
+            else
+              (cd "packages/$package" && npm publish)
+            fi
+          done
+      - name: Compare with the registry
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          # The tarballs' bytes depend on the compressor, so their contents are compared.
+          for package in cef-rs tauri-runtime-cef; do
+            name="@nyssance/$package@${TAG#v}"
+            if ! npm view "$name" version >/dev/null 2>&1; then echo "$name is not published"; continue; fi
+            mkdir -p "registry/$package" "local/$package"
+            (cd "registry/$package" && npm pack "$name" --silent | xargs tar -xzf)
+            (cd "local/$package" && npm pack "$GITHUB_WORKSPACE/packages/$package" --silent | xargs tar -xzf)
+            diff -r "registry/$package/package" "local/$package/package"
+            echo "$name matches its sources"
+          done
