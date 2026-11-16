@@ -59,6 +59,11 @@ name = "tauri_runtime_cef"
 path = "src/lib.rs"
 
 [[test]]
+name = "macos-main-thread-reply"
+path = "tests/macos-main-thread-reply.rs"
+harness = false
+
+[[test]]
 name = "macos-application-bootstrap"
 path = "tests/macos-application-bootstrap.rs"
 harness = false
@@ -187,6 +192,7 @@ default-features = false
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3"
 features = [
+    "CFDate",
     "CFRunLoop",
     "std",
 ]

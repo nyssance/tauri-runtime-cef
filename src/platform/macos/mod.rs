@@ -18,5 +18,5 @@ pub(crate) use application::{
   AppDelegate, AppDelegateEvent, activate_application, set_application_event_handler,
 };
 pub(crate) use fullscreen::FullscreenTransition;
-pub(crate) use wake::MainThreadWake;
+pub use wake::{MainThreadWake, wait_for_reply};
 pub(crate) use window::nswindow;

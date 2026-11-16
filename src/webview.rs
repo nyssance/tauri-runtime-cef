@@ -1885,7 +1885,7 @@ impl<T: UserEvent> CefWebviewDispatcher<T> {
       webview_id: self.webview_id,
       message: WebviewMessage::SendDevToolsMessage(message.to_vec(), tx),
     })?;
-    rx.recv().map_err(|_| Error::FailedToReceiveMessage)?
+    self.context.recv_reply(rx)?
   }
 
   /// Observes the [`DevToolsProtocol`] traffic of this browser.
@@ -1913,7 +1913,7 @@ impl<T: UserEvent> CefWebviewDispatcher<T> {
       webview_id: self.webview_id,
       message: WebviewMessage::OnDevToolsProtocol(handler, tx),
     })?;
-    rx.recv().map_err(|_| Error::FailedToReceiveMessage)?
+    self.context.recv_reply(rx)?
   }
 }
 
@@ -1950,7 +1950,7 @@ fn getter<T: UserEvent, R>(
   receiver: Receiver<Result<R>>,
 ) -> Result<R> {
   context.send_message(message)?;
-  receiver.recv().map_err(|_| Error::FailedToReceiveMessage)?
+  context.recv_reply(receiver)?
 }
 
 macro_rules! webview_getter {
@@ -2073,7 +2073,7 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
         webview_id: self.webview_id,
         message: WebviewMessage::IsDevToolsOpen(tx),
       })?;
-      rx.recv().map_err(|_| Error::FailedToReceiveMessage)
+      self.context.recv_reply(rx)
     }
     #[cfg(not(any(debug_assertions, feature = "devtools")))]
     {
@@ -2228,7 +2228,7 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
       webview_id: self.webview_id,
       message: WebviewMessage::Reparent(window_id, tx),
     })?;
-    let result = rx.recv().map_err(|_| Error::FailedToReceiveMessage)?;
+    let result = self.context.recv_reply(rx)?;
     if result.is_ok() {
       *self.window_id.lock().unwrap() = window_id;
     }
@@ -2242,7 +2242,7 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
       webview_id: self.webview_id,
       message: WebviewMessage::CookiesForUrl(url, tx),
     })?;
-    rx.recv().map_err(|_| Error::FailedToReceiveMessage)?
+    self.context.recv_reply(rx)?
   }
 
   fn cookies(&self) -> Result<Vec<Cookie<'static>>> {

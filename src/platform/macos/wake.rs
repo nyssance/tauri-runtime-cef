@@ -14,12 +14,19 @@
 //! ran, so a proxy signalled there is performed in the same pass, before the loop polls for
 //! AppKit events and dispatches one to a winit callback that might spin a nested loop.
 
-use std::{ffi::c_void, ptr, sync::Arc};
+use std::{
+  ffi::c_void,
+  ptr,
+  sync::{
+    Arc,
+    mpsc::{Receiver, TryRecvError},
+  },
+};
 
 use objc2::MainThreadMarker;
 use objc2_core_foundation::{
   CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopObserver, CFRunLoopObserverContext,
-  kCFRunLoopCommonModes,
+  kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
 
 /// Runs on the main thread at the start of every run-loop pass.
@@ -28,7 +35,7 @@ type OnPass = dyn Fn() + Send + Sync;
 /// Pokes the main run loop from any thread and runs `on_pass` on the main thread at the start
 /// of each of its passes, including those of nested AppKit loops.
 #[derive(Clone)]
-pub(crate) struct MainThreadWake {
+pub struct MainThreadWake {
   inner: Arc<Inner>,
 }
 
@@ -71,7 +78,7 @@ unsafe extern "C-unwind" fn release(info: *const c_void) {
 
 impl MainThreadWake {
   /// Registers the observer on the main run loop. Main thread only.
-  pub(crate) fn new(on_pass: impl Fn() + Send + Sync + 'static) -> Self {
+  pub fn new(on_pass: impl Fn() + Send + Sync + 'static) -> Self {
     debug_assert!(
       MainThreadMarker::new().is_some(),
       "MainThreadWake must be created on the main thread"
@@ -116,7 +123,29 @@ impl MainThreadWake {
   /// Makes the main run loop start a new pass soon, so that `on_pass` runs. Any thread.
   ///
   /// Calls coalesce: the loop wakes once however many times this ran before it did.
-  pub(crate) fn wake_up(&self) {
+  pub fn wake_up(&self) {
     self.inner.main_loop.wake_up();
+  }
+}
+
+/// Waits on the main thread for a reply that a later pass of the main run loop produces,
+/// running the loop one pass at a time instead of blocking it. `None` when the sender is gone.
+pub fn wait_for_reply<R>(receiver: &Receiver<R>) -> Option<R> {
+  assert!(
+    MainThreadMarker::new().is_some(),
+    "wait_for_reply runs the main run loop and must be called on the main thread"
+  );
+  loop {
+    match receiver.try_recv() {
+      Ok(reply) => return Some(reply),
+      Err(TryRecvError::Disconnected) => return None,
+      Err(TryRecvError::Empty) => {
+        // SAFETY: reading an extern static that CoreFoundation initializes.
+        let mode = unsafe { kCFRunLoopDefaultMode };
+        // A short timeout so a reply sent from another thread, which does not wake the loop,
+        // is still picked up promptly.
+        CFRunLoop::run_in_mode(mode, 0.05, true);
+      }
+    }
   }
 }

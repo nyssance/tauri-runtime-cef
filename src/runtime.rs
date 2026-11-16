@@ -1512,6 +1512,24 @@ impl<T: UserEvent> RuntimeContext<T> {
     }
   }
 
+  /// Waits for the reply to a message just sent with [`Self::send_message`].
+  ///
+  /// Off the main thread, or inside a winit callback where the message was handled inline,
+  /// this is a plain `recv`. On the main thread outside a callback the message was queued
+  /// for the loop this thread is supposed to run, so a plain `recv` would never return:
+  /// AppKit calls into the application that way, from notification observers (a Spaces or
+  /// screen-parameter change, say) and dispatched blocks. There the main run loop is run one
+  /// pass at a time until the loop has handled the message, the way the wry runtime answers
+  /// such a call inline at any time.
+  pub(crate) fn recv_reply<R>(&self, receiver: Receiver<R>) -> Result<R> {
+    #[cfg(target_os = "macos")]
+    if self.is_main_thread() {
+      return crate::platform::macos::wait_for_reply(&receiver)
+        .ok_or(Error::FailedToReceiveMessage);
+    }
+    receiver.recv().map_err(|_| Error::FailedToReceiveMessage)
+  }
+
   pub(crate) fn is_main_thread(&self) -> bool {
     std::thread::current().id() == self.main_thread_id
   }
@@ -1752,7 +1770,7 @@ macro_rules! event_loop_getter {
       .context
       .send_message(Message::EventLoop(EventLoopMessage::$variant(tx)))
     {
-      Ok(()) => rx.recv().map_err(|_| Error::FailedToReceiveMessage),
+      Ok(()) => $self.context.recv_reply(rx),
       Err(error) => Err(error),
     }
   }};
@@ -2980,7 +2998,7 @@ impl<T: UserEvent> RuntimeHandle<T> for CefRuntimeHandle<T> {
       .send_message(Message::EventLoop(EventLoopMessage::MonitorFromPoint(
         tx, x, y,
       )))?;
-    rx.recv().map_err(|_| Error::FailedToReceiveMessage)?
+    self.context.recv_reply(rx)?
   }
 
   fn available_monitors(&self) -> Result<Vec<Monitor>> {
@@ -3749,7 +3767,7 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
       .send_message(Message::EventLoop(EventLoopMessage::MonitorFromPoint(
         tx, x, y,
       )))
-      .and_then(|_| rx.recv().map_err(|_| Error::FailedToReceiveMessage))
+      .and_then(|_| self.context.recv_reply(rx))
       .ok()?
       .ok()
       .unwrap_or_default()

@@ -54,6 +54,13 @@ mod window_handle;
 pub use cef::sys::CEF_API_VERSION_LAST;
 #[cfg(target_os = "macos")]
 pub use platform::macos::setup_application as prepare_macos_application;
+/// Internals exercised by the `harness = false` contract tests, which need the process main
+/// thread. Not part of the public interface.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub mod __contract {
+  pub use crate::platform::macos::{MainThreadWake, wait_for_reply};
+}
 pub use runtime::*;
 pub use tauri_ext::*;
 /// Marks the application entry point so non-browser CEF processes (renderer, GPU, ...) are handled.
