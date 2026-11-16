@@ -1,16 +1,19 @@
-# Publishes @nyssance/tauri-runtime-cef and @nyssance/cef-rs when a version tag is pushed here.
-# The bindings are taken from nyssance/cef-rs at the same tag. npm trusts this workflow
-# (trusted publishing), so no token is stored anywhere. Run it by hand to check the packages
-# without publishing.
+# Publishes the npm packages when a version tag is pushed here:
+# - `v<NY CEF version>` publishes @nyssance/cef-rs from nyssance/cef-rs at the same tag. The
+#   bindings are versioned after the CEF build they are generated from.
+# - `runtime-v<release>` publishes @nyssance/tauri-runtime-cef from this repository at that tag.
+#   The runtime has a release line of its own; its crate names the release in build metadata.
+# npm trusts this workflow (trusted publishing), so no token is stored anywhere. Run it by hand to
+# check a package against the registry without publishing.
 name: Publish
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "runtime-v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: Version tag to package, such as v158.0.25
+        description: Version tag to package, such as v158.0.25 or runtime-v158.1.0
         required: true
 
 permissions:
@@ -23,47 +26,54 @@ jobs:
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      - name: Read the tag
+        id: tag
+        run: |
+          case "$TAG" in
+            runtime-v*) echo "kind=runtime" >> "$GITHUB_OUTPUT"; echo "package=tauri-runtime-cef" >> "$GITHUB_OUTPUT"; echo "version=${TAG#runtime-v}" >> "$GITHUB_OUTPUT" ;;
+            v*) echo "kind=bindings" >> "$GITHUB_OUTPUT"; echo "package=cef-rs" >> "$GITHUB_OUTPUT"; echo "version=${TAG#v}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unknown tag $TAG" >&2; exit 1 ;;
+          esac
       # The packaging script as of the commit that runs this workflow.
       - uses: actions/checkout@v5
         with:
           path: tools
           sparse-checkout: .github
       - uses: actions/checkout@v5
+        if: steps.tag.outputs.kind == 'runtime'
         with:
           ref: ${{ env.TAG }}
-          path: runtime
+          path: source
       - uses: actions/checkout@v5
+        if: steps.tag.outputs.kind == 'bindings'
         with:
           repository: nyssance/cef-rs
           ref: ${{ env.TAG }}
-          path: bindings
+          path: source
       - uses: actions/setup-node@v5
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@latest
       - name: Package
-        run: python3 tools/.github/pack-npm.py "${TAG#v}" runtime bindings packages
+        run: python3 tools/.github/pack-npm.py "${{ steps.tag.outputs.kind }}" "${{ steps.tag.outputs.version }}" source package
       - name: Publish
         if: github.event_name == 'push'
         run: |
-          for package in cef-rs tauri-runtime-cef; do
-            if npm view "@nyssance/$package@${TAG#v}" version >/dev/null 2>&1; then
-              echo "@nyssance/$package@${TAG#v} is already published"
-            else
-              (cd "packages/$package" && npm publish)
-            fi
-          done
+          name="@nyssance/${{ steps.tag.outputs.package }}@${{ steps.tag.outputs.version }}"
+          if npm view "$name" version >/dev/null 2>&1; then
+            echo "$name is already published"
+          else
+            (cd package && npm publish)
+          fi
       - name: Compare with the registry
         if: github.event_name == 'workflow_dispatch'
         run: |
           # The tarballs' bytes depend on the compressor, so their contents are compared.
-          for package in cef-rs tauri-runtime-cef; do
-            name="@nyssance/$package@${TAG#v}"
-            if ! npm view "$name" version >/dev/null 2>&1; then echo "$name is not published"; continue; fi
-            mkdir -p "registry/$package" "local/$package"
-            (cd "registry/$package" && npm pack "$name" --silent | xargs tar -xzf)
-            (cd "local/$package" && npm pack "$GITHUB_WORKSPACE/packages/$package" --silent | xargs tar -xzf)
-            diff -r "registry/$package/package" "local/$package/package"
-            echo "$name matches its sources"
-          done
+          name="@nyssance/${{ steps.tag.outputs.package }}@${{ steps.tag.outputs.version }}"
+          if ! npm view "$name" version >/dev/null 2>&1; then echo "$name is not published"; exit 0; fi
+          mkdir -p registry local
+          (cd registry && npm pack "$name" --silent | xargs tar -xzf)
+          (cd local && npm pack "$GITHUB_WORKSPACE/package" --silent | xargs tar -xzf)
+          diff -r registry/package local/package
+          echo "$name matches its sources"
