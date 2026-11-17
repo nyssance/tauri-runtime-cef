@@ -165,11 +165,8 @@ impl AppWindow {
       return;
     };
 
-    let overlay = nswindow.titlebarAppearsTransparent()
-      && nswindow
-        .styleMask()
-        .contains(NSWindowStyleMask::FullSizeContentView);
-    nswindow.setMovable(!overlay && !self.window.simple_fullscreen());
+    // Overlay controls titlebar composition, not native window movement or tiling.
+    nswindow.setMovable(!self.window.simple_fullscreen());
   }
 
   pub(crate) fn set_visible_on_all_workspaces(&self, visible: bool) {
