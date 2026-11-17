@@ -33,7 +33,7 @@ base64 = "0.22"
 cef = { version = "=154.5.0", features = ["build-util", "linux-x11"] }
 # Not actually used directly, just locking it.
 cef-dll-sys = { version = "=154.5.0", default-features = false }
-dirs = "6"
+dirs = "7"
 dioxus-debug-cell = "0.1"
 http = "1"
 kuchiki = { package = "kuchikiki", version = "0.8.8-speedreader" }

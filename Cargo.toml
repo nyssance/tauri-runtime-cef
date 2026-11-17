@@ -86,7 +86,7 @@ default-features = false
 version = "0.1"
 
 [dependencies.dirs]
-version = "6"
+version = "7"
 
 [dependencies.html5ever]
 version = "0.29"
