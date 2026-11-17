@@ -675,8 +675,8 @@ impl<T: UserEvent> WinitCefApp<T> {
     let parent = appwindow.cef_host_handle();
     let parent_size = appwindow.safe_surface_size();
     let scale = appwindow.window.scale_factor();
-    let app_wide_theme = *context.app_wide_theme.lock().unwrap();
-    let theme = appwindow.resolved_theme(app_wide_theme);
+    // Pages follow the application-wide theme; see `AppWindow::set_window_theme`.
+    let theme = *context.app_wide_theme.lock().unwrap();
     let surface_embed_parent = match &pending.runtime_specific_attributes.surface_embed_parent {
       Some(label) => {
         if !cfg!(feature = "surface-embed") {

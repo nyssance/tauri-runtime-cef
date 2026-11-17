@@ -475,6 +475,9 @@ pub(crate) struct AppWindow {
   pub(crate) window: Arc<dyn WinitWindow>,
   pub(crate) attrs: AppWindowAttrs,
   pub(crate) children: Vec<AppWebview>,
+  /// The theme this window chose for itself, through its builder or `Window::set_theme`. A window
+  /// with one keeps it when the application-wide theme changes; `None` follows the application.
+  pub(crate) own_theme: Option<Theme>,
   pub(crate) native_drag_drop: Option<WinitDragDropState>,
   #[cfg(any(
     target_os = "linux",
@@ -715,10 +718,6 @@ impl AppWindow {
       .map(winit_theme_to_tauri_theme)
   }
 
-  pub(crate) fn resolved_theme(&self, app_wide_theme: Option<Theme>) -> Option<Theme> {
-    self.preferred_theme().or(app_wide_theme)
-  }
-
   /// Size available for CEF child layout. On Linux this is the GTK content-area
   /// X11 host size, excluding GTK UI such as menus; elsewhere it is the window
   /// surface size.
@@ -744,15 +743,23 @@ impl AppWindow {
     self.window.surface_size()
   }
 
+  /// Applies the application-wide theme to this window and its pages.
   pub(crate) fn set_theme(&mut self, theme: Option<Theme>) {
+    self.set_window_theme(theme);
+    self.apply_cef_theme(theme);
+  }
+
+  /// Applies a theme to the native window only. Pages keep the application-wide color scheme:
+  /// webviews without their own data directory share one browser profile, whose color scheme
+  /// would otherwise follow whichever window set it last.
+  pub(crate) fn set_window_theme(&mut self, theme: Option<Theme>) {
     self.attrs.inner.preferred_theme = tauri_theme_to_winit_theme(theme);
     self.window.set_theme(tauri_theme_to_winit_theme(theme));
-    self.apply_cef_theme(theme);
     #[cfg(target_os = "macos")]
     self.reapply_traffic_light_position_after_appearance_change();
   }
 
-  fn apply_cef_theme(&self, theme: Option<Theme>) {
+  pub(crate) fn apply_cef_theme(&self, theme: Option<Theme>) {
     for child in &self.children {
       let request_context = child.host.request_context();
       request_context::apply_theme_scheme(request_context.as_ref(), theme);
@@ -770,6 +777,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     _after_window_creation: Option<AfterWindowCreationCallback>,
   ) -> Result<()> {
     let mut attrs = pending.window_builder.attrs.clone();
+    let own_theme = attrs.inner.preferred_theme.map(winit_theme_to_tauri_theme);
     if attrs.inner.preferred_theme.is_none() {
       attrs.inner.preferred_theme =
         tauri_theme_to_winit_theme(*self.context.app_wide_theme.lock().unwrap());
@@ -816,6 +824,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       window: Arc::from(window),
       attrs,
       children: Vec::new(),
+      own_theme,
       native_drag_drop: None,
       #[cfg(any(
         target_os = "linux",
@@ -1292,7 +1301,11 @@ impl<T: UserEvent> WinitCefApp<T> {
         appwindow.attrs.background_color = color;
         appwindow.set_background_color(color);
       }
-      WindowMessage::SetTheme(theme) => appwindow.set_theme(theme),
+      WindowMessage::SetTheme(theme) => {
+        // A window theme overrides the application-wide one; clearing it follows the application again.
+        appwindow.own_theme = theme;
+        appwindow.set_window_theme(theme.or(*self.context.app_wide_theme.lock().unwrap()));
+      }
       WindowMessage::SetBadgeCount(count, desktop_filename) => {
         event_loop.set_badge_count(count, desktop_filename)
       }

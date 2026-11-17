@@ -2130,8 +2130,13 @@ impl<T: UserEvent> WinitCefApp<T> {
     match message {
       EventLoopMessage::SetTheme(theme) => {
         *self.context.app_wide_theme.lock().unwrap() = theme;
+        // Windows that chose their own theme keep it; their pages still follow the application.
         for appwindow in self.state.windows.values_mut() {
-          appwindow.set_theme(theme);
+          if appwindow.own_theme.is_none() {
+            appwindow.set_theme(theme);
+          } else {
+            appwindow.apply_cef_theme(theme);
+          }
         }
       }
       EventLoopMessage::PrimaryMonitor(tx) => {
@@ -2535,7 +2540,8 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
       WinitWindowEvent::ThemeChanged(theme) => {
         let system_theme = winit_theme_to_tauri_theme(theme);
         if let Some(explicit_theme) = appwindow.preferred_theme() {
-          appwindow.set_theme(Some(explicit_theme));
+          appwindow.set_window_theme(Some(explicit_theme));
+          appwindow.apply_cef_theme(*self.context.app_wide_theme.lock().unwrap());
         } else {
           // Following the system: the appearance changed without going through
           // `set_theme`, so the titlebar rebuild still has to be undone.
