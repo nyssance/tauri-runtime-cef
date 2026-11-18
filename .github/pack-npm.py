@@ -47,12 +47,14 @@ if kind == 'bindings':
     (package / 'package.json').write_text(json.dumps(manifest(
         '@nyssance/cef-rs',
         'Rust bindings and SDK download tooling for NY CEF',
-        'nyssance/cef-rs', ['rust', 'README.md', 'LICENSE-APACHE', 'LICENSE-MIT']), indent=2) + '\n')
+        'nyssance/tauri-runtime-cef', ['rust', 'README.md', 'LICENSE-APACHE', 'LICENSE-MIT']), indent=2) + '\n')
     (package / 'README.md').write_text(f'''# @nyssance/cef-rs
 
 The `cef` and `cef-dll-sys` crates as maintained for [NY CEF](https://github.com/nyssance/ny-cef),
 Package release {version} contains bindings generated from NY CEF {cef_version}.
 Package patches can update download tooling without changing the CEF binary or Rust crate versions.
+Bindings sources are maintained in [nyssance/cef-rs](https://github.com/nyssance/cef-rs);
+the package is assembled and published from [tauri-runtime-cef](https://github.com/nyssance/tauri-runtime-cef).
 The crates keep the names of the crates they derive from
 ([tauri-apps/cef-rs](https://github.com/tauri-apps/cef-rs)), so a project takes them in place of
 those with a Cargo patch:

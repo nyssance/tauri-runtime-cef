@@ -15,6 +15,10 @@ on:
       tag:
         description: Version tag to package, such as v158.0.25 or runtime-v158.1.0
         required: true
+      publish:
+        description: Publish the selected tag after validating its package
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,7 +62,7 @@ jobs:
       - name: Package
         run: python3 tools/.github/pack-npm.py "${{ steps.tag.outputs.kind }}" "${{ steps.tag.outputs.version }}" source package
       - name: Publish
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.publish
         run: |
           name="@nyssance/${{ steps.tag.outputs.package }}@${{ steps.tag.outputs.version }}"
           if npm view "$name" version >/dev/null 2>&1; then
