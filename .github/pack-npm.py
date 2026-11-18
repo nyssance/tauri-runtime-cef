@@ -1,7 +1,7 @@
 # Stage one of the two npm packages that carry the Rust sources of the CEF runtime and bindings.
 # Usage: pack-npm.py bindings <version> <bindings checkout> <output directory>
 #        pack-npm.py runtime <version> <runtime checkout> <output directory>
-# The bindings are versioned after the NY CEF build they are generated from. The runtime has a
+# Bindings package patches may update distribution tooling without changing the CEF ABI. The runtime has a
 # release line of its own: its crate keeps the upstream version it is based on, which the crates
 # depending on it require, and names the release in build metadata (`3.0.0-alpha.7+ny.158.1.0`).
 # The NY CEF version it needs is the one its `cef` dependency pins.
@@ -42,15 +42,18 @@ if kind == 'bindings':
     text, count = re.subn(r'members = \[.*?\]', 'members = ["download-cef", "sys", "cef"]', text, count=1, flags=re.S)
     assert count == 1
     root.write_text(text)
+    cef_version = re.search(r'^\[workspace.package\]\nversion = "([^"]+)"', text, re.M).group(1).split('+')[-1]
     licences(package / 'rust', package)
     (package / 'package.json').write_text(json.dumps(manifest(
         '@nyssance/cef-rs',
-        'Rust bindings for NY CEF: the cef and cef-dll-sys crates generated from the build of the same version',
+        'Rust bindings and SDK download tooling for NY CEF',
         'nyssance/cef-rs', ['rust', 'README.md', 'LICENSE-APACHE', 'LICENSE-MIT']), indent=2) + '\n')
     (package / 'README.md').write_text(f'''# @nyssance/cef-rs
 
 The `cef` and `cef-dll-sys` crates as maintained for [NY CEF](https://github.com/nyssance/ny-cef),
-generated from NY CEF {version}. They keep the names of the crates they derive from
+Package release {version} contains bindings generated from NY CEF {cef_version}.
+Package patches can update download tooling without changing the CEF binary or Rust crate versions.
+The crates keep the names of the crates they derive from
 ([tauri-apps/cef-rs](https://github.com/tauri-apps/cef-rs)), so a project takes them in place of
 those with a Cargo patch:
 
