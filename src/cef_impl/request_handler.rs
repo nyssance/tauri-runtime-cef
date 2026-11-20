@@ -12,8 +12,8 @@ use cef::{rc::*, *};
 use dioxus_debug_cell::RefCell;
 use html5ever::{LocalName, interface::QualName, namespace_url, ns};
 use http::{
-  HeaderMap, HeaderName, HeaderValue,
-  header::{CONTENT_SECURITY_POLICY, CONTENT_TYPE, ORIGIN},
+  HeaderMap, HeaderName, HeaderValue, StatusCode,
+  header::{CONTENT_RANGE, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ORIGIN},
 };
 use kuchiki::{Attribute, ExpandedName, NodeRef};
 use tauri_runtime::{
@@ -497,6 +497,32 @@ wrap_with_args! {
       }
     }
 
+    fn skip(
+      &self,
+      bytes_to_skip: i64,
+      bytes_skipped: Option<&mut i64>,
+      _callback: Option<&mut ResourceSkipCallback>,
+    ) -> ::std::os::raw::c_int {
+      let Some(bytes_skipped) = bytes_skipped else { return 0 };
+      let response = self.response.borrow();
+      let start = response.as_ref().and_then(|response| {
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+          return None;
+        }
+        let range = response.headers().get(CONTENT_RANGE)?.to_str().ok()?;
+        range.strip_prefix("bytes ")?.split_once('-')?.0.parse::<i64>().ok()
+      });
+      // Chromium asks to skip the resource prefix even when the protocol handler
+      // already returned just the requested interval. Keep the cursor at that interval's start.
+      if bytes_to_skip > 0 && start == Some(bytes_to_skip) {
+        *bytes_skipped = bytes_to_skip;
+        1
+      } else {
+        *bytes_skipped = -2;
+        0
+      }
+    }
+
     fn read(
       &self,
       data_out: *mut u8,
@@ -737,6 +763,70 @@ fn termination_reason(
     TerminationStatus::LAUNCH_FAILED => Reason::LaunchFailed,
     TerminationStatus::INTEGRITY_FAILURE => Reason::IntegrityFailure,
     _ => Reason::Unknown,
+  }
+}
+
+#[cfg(test)]
+mod range_tests {
+  use super::*;
+
+  fn handler(status: StatusCode, content_range: &str) -> ResourceHandler {
+    let response = http::Response::builder()
+      .status(status)
+      .header(CONTENT_RANGE, content_range)
+      .body(Cursor::new(b"tail".to_vec()))
+      .unwrap();
+    WebResourceHandler::build(WebResourceHandlerArgs {
+      webview_label: String::new(),
+      handler: Arc::new(Box::new(|_, _, _| unreachable!())),
+      initialization_scripts: Arc::new(Vec::new()),
+      is_main_frame: true,
+      initiator_origin: None,
+      main_thread: Arc::new(|_| unreachable!()),
+      response: Arc::new(RefCell::new(Some(response))),
+    })
+  }
+
+  #[test]
+  fn acknowledges_the_skipped_prefix_and_reads_the_entire_partial_body() {
+    let handler = handler(
+      StatusCode::PARTIAL_CONTENT,
+      "bytes 17825792-17825795/17825796",
+    );
+    let mut skipped = 0;
+    assert_eq!(handler.skip(17 * 1024 * 1024, Some(&mut skipped), None), 1);
+    assert_eq!(skipped, 17 * 1024 * 1024);
+
+    let mut bytes = [0; 4];
+    let mut read = 0;
+    assert_eq!(
+      handler.read(
+        bytes.as_mut_ptr(),
+        bytes.len() as i32,
+        Some(&mut read),
+        None
+      ),
+      1
+    );
+    assert_eq!(read, 4);
+    assert_eq!(&bytes, b"tail");
+  }
+
+  #[test]
+  fn rejects_skips_without_a_matching_partial_response_prefix() {
+    for (status, range, offset) in [
+      (StatusCode::OK, "bytes 10-13/14", 10),
+      (StatusCode::PARTIAL_CONTENT, "bytes 10-13/14", 4),
+      (StatusCode::PARTIAL_CONTENT, "invalid", 10),
+      (StatusCode::PARTIAL_CONTENT, "bytes 0-3/4", 0),
+    ] {
+      let mut skipped = 0;
+      assert_eq!(
+        handler(status, range).skip(offset, Some(&mut skipped), None),
+        0
+      );
+      assert_eq!(skipped, -2);
+    }
   }
 }
 
