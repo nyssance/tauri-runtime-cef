@@ -189,7 +189,8 @@ pub(crate) fn event_from_script_event(
     }
     "over" => state.entered.then_some(DragDropEvent::Over { position }),
     "drop" => {
-      let paths = state.entered.then(|| state.paths.take()).flatten();
+      // Native enter already captured the paths. Independent DOM requests can arrive out of order.
+      let paths = state.paths.take();
       state.entered = false;
       state.native_entered = false;
       paths.map(|paths| DragDropEvent::Drop { paths, position })
@@ -206,6 +207,77 @@ pub(crate) fn event_from_script_event(
       }
     }
     _ => None,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn file_drop_survives_a_delayed_dom_enter() {
+    let files = vec![PathBuf::from("dragged-file.png")];
+    let state = Arc::new(Mutex::new(DragDropState {
+      paths: Some(files.clone()),
+      native_entered: true,
+      entered: false,
+    }));
+    let event = |kind: &str| DragDropScriptEvent {
+      kind: kind.into(),
+      x: 200.0,
+      y: 100.0,
+    };
+
+    assert!(matches!(
+      event_from_script_event(&state, event("drop")),
+      Some(DragDropEvent::Drop { paths, position })
+        if paths == files && position == PhysicalPosition::new(200.0, 100.0)
+    ));
+    assert!(event_from_script_event(&state, event("enter")).is_none());
+    assert!(event_from_script_event(&state, event("drop")).is_none());
+  }
+
+  #[test]
+  fn ordered_file_drop_preserves_paths_and_position() {
+    let files = vec![PathBuf::from("dragged-file.png")];
+    let state = Arc::new(Mutex::new(DragDropState {
+      paths: Some(files.clone()),
+      native_entered: true,
+      entered: false,
+    }));
+    let event = |kind: &str| DragDropScriptEvent {
+      kind: kind.into(),
+      x: 200.0,
+      y: 100.0,
+    };
+
+    assert!(matches!(
+      event_from_script_event(&state, event("enter")),
+      Some(DragDropEvent::Enter { paths, position })
+        if paths == files && position == PhysicalPosition::new(200.0, 100.0)
+    ));
+    assert!(matches!(
+      event_from_script_event(&state, event("drop")),
+      Some(DragDropEvent::Drop { paths, position })
+        if paths == files && position == PhysicalPosition::new(200.0, 100.0)
+    ));
+    assert!(event_from_script_event(&state, event("drop")).is_none());
+  }
+
+  #[test]
+  fn a_drop_without_native_file_data_is_ignored() {
+    let state = Arc::new(Mutex::new(DragDropState::default()));
+    assert!(
+      event_from_script_event(
+        &state,
+        DragDropScriptEvent {
+          kind: "drop".into(),
+          x: 200.0,
+          y: 100.0,
+        }
+      )
+      .is_none()
+    );
   }
 }
 
